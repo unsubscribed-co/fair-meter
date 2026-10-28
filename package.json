@@ -1,0 +1,53 @@
+{
+  "name": "fair-meter",
+  "version": "0.1.0",
+  "description": "Per-person, per-app spend metering for apps hosted at cost: prices, an append-only ledger in the app's own DynamoDB table, caps and a brake.",
+  "license": "AGPL-3.0-only",
+  "repository": "github:unsubscribed-co/fair-meter",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "files": [
+    "src",
+    "!src/test",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "jest",
+    "typecheck": "tsc"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1145.0",
+    "@aws-sdk/client-dynamodb": "^3.1142.0",
+    "@aws-sdk/client-s3": "^3.1145.0",
+    "@aws-sdk/client-sqs": "^3.1144.0",
+    "@aws-sdk/client-ssm": "^3.1142.0",
+    "@aws-sdk/lib-dynamodb": "^3.1142.0",
+    "@aws-sdk/util-dynamodb": "^3.996.9",
+    "@types/aws-lambda": "^8.10.164",
+    "aws-cdk-lib": "^2.270.0",
+    "constructs": "^10.5.0"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1145.0",
+    "@aws-sdk/client-dynamodb": "^3.1142.0",
+    "@aws-sdk/client-s3": "^3.1145.0",
+    "@aws-sdk/client-sqs": "^3.1144.0",
+    "@aws-sdk/client-ssm": "^3.1142.0",
+    "@aws-sdk/lib-dynamodb": "^3.1142.0",
+    "@aws-sdk/util-dynamodb": "^3.996.9",
+    "@swc/core": "^1.15.0",
+    "@swc/jest": "^0.2.39",
+    "@types/aws-lambda": "^8.10.164",
+    "@types/jest": "^30",
+    "@types/node": "^24.10.1",
+    "aws-cdk-lib": "^2.270.0",
+    "aws-sdk-client-mock": "^4.1.0",
+    "constructs": "^10.5.0",
+    "esbuild": "^0.28.2",
+    "jest": "^30",
+    "typescript": "~7.0.2"
+  }
+}
