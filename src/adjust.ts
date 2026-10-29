@@ -24,7 +24,8 @@ export function checkReason(reason: string): string {
 export interface Adjustment {
   appId: string;
   sub: string;
-  householdId: string;
+  /** Absent for FairMeter events: no household counter to correct. */
+  householdId?: string;
   /** The corrected event's plan (undefined = legacy prepaid). */
   plan?: string;
   /** SK of the EVENT this corrects (same USER# partition). */
@@ -62,7 +63,7 @@ export function adjustedCounterKeys(a: Pick<Adjustment, 'sub' | 'householdId' | 
   return [
     keys.userMonth(a.sub, a.appId, month),
     keys.userDay(a.sub, a.appId, day),
-    keys.householdMonth(a.householdId, a.appId, month),
+    ...(a.householdId !== undefined ? [keys.householdMonth(a.householdId, a.appId, month)] : []),
   ];
 }
 
@@ -79,6 +80,7 @@ export function adjustmentTransaction(table: string, a: Adjustment) {
     throw new Error(`Inconsistent adjustment delta for ${a.eventSk}`);
   }
   checkReason(a.reason);
+  if (a.deductCredit && a.householdId === undefined) throw new Error(`No household credit to correct for ${a.eventSk}`);
   const id = adjustmentId(a.reason, a.eventSk);
   const counter = (key: TableKey) => ({
     Update: {
@@ -99,7 +101,7 @@ export function adjustmentTransaction(table: string, a: Adjustment) {
             ...keys.adjustment(a.sub, a.eventTime, a.appId, id),
             adjustmentId: id,
             appId: a.appId,
-            householdId: a.householdId,
+            ...(a.householdId !== undefined ? { householdId: a.householdId } : {}),
             ...(a.plan ? { plan: a.plan } : {}),
             eventSk: a.eventSk,
             eventTime: a.eventTime,
@@ -125,7 +127,7 @@ export function adjustmentTransaction(table: string, a: Adjustment) {
             {
               Update: {
                 TableName: table,
-                Key: keys.householdMeta(a.householdId),
+                Key: keys.householdMeta(a.householdId!),
                 // Same sign convention as the charge: a negative delta refunds credit.
                 UpdateExpression: 'ADD creditBalanceMicroUsd :neg',
                 ConditionExpression: pkExists(),

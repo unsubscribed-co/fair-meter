@@ -9,12 +9,15 @@
  *   HOUSEHOLD#<id>    USAGE#<app>#<YYYY-MM>           counters (monthly allowance); optional one-way marks an app sets
  *                                                     once a month (UsageRecord.householdMonthMarks, e.g. Nieto's premiumEndedAt)
  *   USER#<sub>        USAGE#<app>#<YYYY-MM>           counters
- *   USER#<sub>        DAILY#<app>#<YYYY-MM-DD>        counters (per-user daily cap)
+ *   USER#<sub>        DAILY#<app>#<YYYY-MM-DD>        counters (per-user daily cap); committedMicroUsd (FairMeter:
+ *                                                     settled cost plus open holds, the attribute the cap condition reads)
  *   USER#<sub>        RATE#<app>#<YYYY-MM-DDTHH:MM>   calls this UTC minute (per-minute brake); expiresAt (TTL)
  *   USER#<sub>        EVENT#<iso-ms>#<app>#<requestId> one item per call (appId attribute too)
  *   USER#<sub>        ADJUST#<iso-ms>#<app>#<adjId>   one correction of one event (iso-ms = the EVENT's time)
  *   APP#<app>         DAILY#<YYYY-MM-DD>              counters (per-app circuit breaker)
  *   GLOBAL            DAILY#<YYYY-MM-DD>              counters (all-apps ceiling)
+ *   PENDING#<app>     CALL#<callId>                   FairMeter: one open reservation per provider attempt, deleted
+ *                                                     when it is settled (EVENT put in the same transaction) or released
  *   PRICING#<sku>     <validFrom>                     price versions, shared by all apps
  *   PLANDEF#<app>#<plan> <validFrom>                  plan definition versions (what a plan includes per budget mode),
  *                                                     immutable like prices: validFrom, validTo, grid (the app's own shape)
@@ -117,6 +120,8 @@ export const keys = {
    * free Chirp 3 HD characters), written in the usage transaction (UsageRecord.providerMonth).
    */
   providerMonth: (provider: string, month: string) => key(`PROVIDER#${provider}`, `MONTH#${month}`),
+  /** One open FairMeter reservation; the sweeper reads the app's whole partition. */
+  pending: (appId: string, callId: string) => key(`PENDING#${appId}`, `CALL#${callId}`),
   /**
    * One immutable version of a plan's definition for one app, valid in [validFrom, validTo) like a
    * price version (validFrom = SK, canonical UTC to the second). Version id: `<plan>@<SK>`.

@@ -184,7 +184,7 @@ export function planReprice(args: {
   for (const event of events) {
     const sk = skOf(event);
     const sub = subOf(event);
-    const householdId = String(event.householdId ?? 'unknown');
+    const householdId = event.householdId === undefined ? undefined : String(event.householdId);
     if (args.sku && eventSku(event) !== args.sku) continue;
     const prior = priorBy.get(`${pkOf(event)}|${sk}`) ?? [];
     const result = repriceEvent(event, args.priceHistory, prior, args.pricesAt);
@@ -195,7 +195,7 @@ export function planReprice(args: {
     }
     if (result.status === 'unchanged') {
       plan.counts.unchanged += 1;
-      add(plan.byHousehold, householdId, result.costMicroUsd, result.costMicroUsd);
+      add(plan.byHousehold, householdId ?? 'unknown', result.costMicroUsd, result.costMicroUsd);
       add(plan.byUser, sub, result.costMicroUsd, result.costMicroUsd);
       continue;
     }
@@ -205,12 +205,12 @@ export function planReprice(args: {
       continue;
     }
     plan.counts.changed += 1;
-    add(plan.byHousehold, householdId, result.oldCostMicroUsd, result.newCostMicroUsd);
+    add(plan.byHousehold, householdId ?? 'unknown', result.oldCostMicroUsd, result.newCostMicroUsd);
     add(plan.byUser, sub, result.oldCostMicroUsd, result.newCostMicroUsd);
     plan.adjustments.push({
       appId: args.appId,
       sub,
-      householdId,
+      ...(householdId !== undefined ? { householdId } : {}),
       ...(event.plan ? { plan: String(event.plan) } : {}),
       eventSk: sk,
       eventTime: ledgerTime(sk),
@@ -224,7 +224,7 @@ export function planReprice(args: {
       newCostMicroUsd: result.newCostMicroUsd,
       deltaMicroUsd: result.deltaMicroUsd,
       createdAt: args.now.toISOString(),
-      deductCredit: args.billing !== 'none' && event.plan === undefined,
+      deductCredit: args.billing !== 'none' && event.plan === undefined && householdId !== undefined,
       ...(result.band || result.tier
         ? { details: { ...(result.band ? { newPricingBand: result.band } : {}), ...(result.tier ? { newPricingTier: result.tier } : {}) } }
         : {}),

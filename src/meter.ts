@@ -87,6 +87,8 @@ export class Meter {
     private readonly clients: MeteringClients,
   ) {
     assertAppId(cfg.appId);
+    // A bad markup would make every record throw after the provider was paid (L1): refuse at startup.
+    if (!Number.isSafeInteger(cfg.markupBps) || cfg.markupBps < 0) throw new Error(`Invalid markupBps ${cfg.markupBps} (a non-negative integer)`);
   }
 
   get appId() {
@@ -171,8 +173,9 @@ export class Meter {
   /**
    * Per-minute brake against loops (limits.maxCallsPerMinute): one atomic conditional counter per user
    * and UTC minute, expiring on its own. Returns the seconds to wait when over, else undefined.
+   * FairMeter reuses it.
    */
-  private async brake(sub: string, at: Date): Promise<number | undefined> {
+  async brake(sub: string, at: Date): Promise<number | undefined> {
     const max = this.cfg.limits.maxCallsPerMinute;
     if (max === undefined) return undefined;
     const minuteStartMs = Math.floor(at.getTime() / 60_000) * 60_000;
@@ -507,7 +510,8 @@ export class Meter {
    */
   async record(record: UsageRecord): Promise<'recorded' | 'duplicate' | 'deferred' | 'failed'> {
     try {
-      return await recordUsage(this.clients.ddb, this.cfg.tableName, record);
+      // Old-path records (no reservedMicroUsd) only ever resolve these two.
+      return (await recordUsage(this.clients.ddb, this.cfg.tableName, record)) as 'recorded' | 'duplicate';
     } catch (err) {
       try {
         await this.clients.sqs.send(new SendMessageCommand({ QueueUrl: this.cfg.retryQueueUrl, MessageBody: JSON.stringify(record) }));

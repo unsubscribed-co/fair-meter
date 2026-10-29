@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { keys, pkExists, pkNotExists, type TableKey } from './keys';
+import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { applyAdjustment } from './adjust';
+import { keys, pkExists, pkNotExists, skOf, type TableKey } from './keys';
 
 /**
  * One metered call, fully priced. It is plain JSON so it can wait on the retry queue and be
@@ -9,7 +10,8 @@ import { keys, pkExists, pkNotExists, type TableKey } from './keys';
 export interface UsageRecord {
   appId: string;
   sub: string;
-  householdId: string;
+  /** Absent on FairMeter records: no household counter, no credit. */
+  householdId?: string;
   /** Household plan for this app at call time (undefined = legacy prepaid). Lets statements drop dev traffic. */
   plan?: string;
   /** The app's request id (e.g. API Gateway's): one per incoming call, so one upstream call. */
@@ -42,6 +44,21 @@ export interface UsageRecord {
    * no-ops, e.g. Nieto's `{ premiumEndedAt: <iso>, premiumEndedReason: 'household_share' }`.
    */
   householdMonthMarks?: Record<string, string>;
+  /** Which deployment ("prod" | "dev"); FairMeter writes it on every EVENT. */
+  env?: string;
+  /** Who paid the provider: a key billed to a card, or a credit (e.g. Claude on API credit). */
+  paidBy?: 'credit' | 'paid';
+  /**
+   * FairMeter: the hold this record settles. Its PENDING row is deleted in the same transaction
+   * and the person's day `committedMicroUsd` moves by cost − reserved. Absent on the old path.
+   */
+  reservedMicroUsd?: number;
+  /** FairMeter: tells a repeat of this same record ('duplicate') from a different one ('conflict'). */
+  usageHash?: string;
+  /** Not the provider's reported usage: the app aborted, no usage came back, or the sweeper settled it. */
+  estimated?: 'aborted' | 'no_usage' | 'swept';
+  /** FairMeter 'not_billed': release the hold; no EVENT and no counters. */
+  release?: boolean;
 }
 
 /** DynamoDB idempotency token (max 36 chars) derived from app and request id. */
@@ -80,6 +97,18 @@ export function recordProvider(r: Pick<UsageRecord, 'details'>): string | undefi
 export function usageTransaction(table: string, r: UsageRecord) {
   const month = r.requestTime.slice(0, 7);
   const day = r.requestTime.slice(0, 10);
+  const held = r.reservedMicroUsd;
+  const pending = held === undefined ? [] : [{ Delete: { TableName: table, Key: keys.pending(r.appId, r.requestId), ConditionExpression: pkExists() } }];
+  if (r.release) {
+    if (held === undefined) throw new Error(`A release needs reservedMicroUsd: ${r.requestId}`);
+    return new TransactWriteCommand({
+      ClientRequestToken: clientRequestToken(r.appId, r.requestId),
+      TransactItems: [
+        ...pending,
+        { Update: { TableName: table, Key: keys.userDay(r.sub, r.appId, day), UpdateExpression: 'ADD committedMicroUsd :held', ExpressionAttributeValues: { ':held': -held } } },
+      ],
+    });
+  }
   const names = Object.keys(r.counters);
   if (!names.every((n) => COUNTER_NAME.test(n))) throw new Error(`Invalid counter names: ${names.join(',')}`);
   const meters = `ADD requests :one, ${names.map((name, i) => `${name} :c${i}, `).join('')}`;
@@ -89,6 +118,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
     ExpressionAttributeValues: { ...meterValues, ':cost': r.costMicroUsd },
   };
   const counter = (key: TableKey) => ({ Update: { TableName: table, Key: key, ...counters } });
+  if (r.householdId === undefined && (r.deductCredit || r.householdMonthMarks)) throw new Error(`No household to charge: ${r.requestId}`);
   const provider = recordProvider(r);
   const freeTier = r.providerMonth;
   const freeTierNames = Object.keys(freeTier?.counters ?? {});
@@ -100,16 +130,16 @@ export function usageTransaction(table: string, r: UsageRecord) {
   const marks = Object.entries(r.householdMonthMarks ?? {});
   if (!marks.every(([n, v]) => COUNTER_NAME.test(n) && typeof v === 'string' && v)) throw new Error(`Invalid household month marks: ${marks.map(([n]) => n).join(',')}`);
   // The household month: counters plus the one-way marks, in the same update.
-  const householdMonth = marks.length
+  const householdMonth = r.householdId === undefined ? [] : [marks.length
     ? {
         Update: {
           TableName: table,
-          Key: keys.householdMonth(r.householdId, r.appId, month),
+          Key: keys.householdMonth(r.householdId!, r.appId, month),
           UpdateExpression: `${counters.UpdateExpression} SET ${marks.map(([n], i) => `${n} = if_not_exists(${n}, :m${i})`).join(', ')}`,
           ExpressionAttributeValues: { ...counters.ExpressionAttributeValues, ...Object.fromEntries(marks.map(([, v], i) => [`:m${i}`, v])) },
         },
       }
-    : counter(keys.householdMonth(r.householdId, r.appId, month));
+    : counter(keys.householdMonth(r.householdId!, r.appId, month))];
   // Free-tier counters (with `requests`) and set members, e.g. "ADD requests :one, premiumChars :f0, voiceHouseholds :s0".
   const freeTierAdds = [
     ...(freeTierNames.length ? ['requests :one', ...freeTierNames.map((name, i) => `${name} :f${i}`)] : []),
@@ -126,7 +156,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
             ...keys.event(r.sub, r.requestTime, r.appId, r.requestId),
             appId: r.appId,
             kind: r.kind,
-            householdId: r.householdId,
+            ...(r.householdId !== undefined ? { householdId: r.householdId } : {}),
             ...(r.plan ? { plan: r.plan } : {}),
             requestId: r.requestId,
             ...r.details,
@@ -134,13 +164,28 @@ export function usageTransaction(table: string, r: UsageRecord) {
             baseCostMicroUsd: r.baseCostMicroUsd,
             costMicroUsd: r.costMicroUsd,
             markupBps: r.markupBps,
+            ...(r.env !== undefined ? { env: r.env } : {}),
+            ...(r.paidBy !== undefined ? { paidBy: r.paidBy } : {}),
+            ...(held !== undefined ? { reservedMicroUsd: held } : {}),
+            ...(r.usageHash !== undefined ? { usageHash: r.usageHash } : {}),
+            ...(r.estimated !== undefined ? { estimated: r.estimated } : {}),
           },
           ConditionExpression: pkNotExists(),
         },
       },
       counter(keys.userMonth(r.sub, r.appId, month)),
-      counter(keys.userDay(r.sub, r.appId, day)),
-      householdMonth,
+      held === undefined
+        ? counter(keys.userDay(r.sub, r.appId, day))
+        : {
+            Update: {
+              TableName: table,
+              Key: keys.userDay(r.sub, r.appId, day),
+              // The hold becomes the actual cost: committed (the cap's attribute) moves by the difference.
+              UpdateExpression: `${counters.UpdateExpression}, committedMicroUsd :held`,
+              ExpressionAttributeValues: { ...counters.ExpressionAttributeValues, ':held': r.costMicroUsd - held },
+            },
+          },
+      ...householdMonth,
       counter(keys.appDay(r.appId, day)),
       counter(keys.globalDay(day)),
       ...(provider
@@ -178,7 +223,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
             {
               Update: {
                 TableName: table,
-                Key: keys.householdMeta(r.householdId),
+                Key: keys.householdMeta(r.householdId!),
                 // May go slightly negative on the last request; that overshoot is accepted by design.
                 UpdateExpression: 'ADD creditBalanceMicroUsd :neg',
                 ConditionExpression: pkExists(),
@@ -187,6 +232,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
             },
           ]
         : []),
+      ...pending,
     ],
   });
 }
@@ -197,17 +243,70 @@ export function isAlreadyRecorded(err: unknown): boolean {
   return e?.name === 'TransactionCanceledException' && e.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed';
 }
 
-/** Records a call exactly once. Resolves 'duplicate' when an earlier attempt already got through. */
+/**
+ * Records a call exactly once. Resolves 'duplicate' when an earlier attempt already got through.
+ * FairMeter records (reservedMicroUsd) also resolve 'trued_up' (real usage after the sweeper's
+ * estimate, written as an ADJUST) or 'conflict' (a different payload for the same call: refused,
+ * RECORD_CONFLICT alarms). Anything else throws, for the caller to queue.
+ */
 export async function recordUsage(
   ddb: DynamoDBDocumentClient,
   table: string,
   r: UsageRecord,
-): Promise<'recorded' | 'duplicate'> {
+): Promise<'recorded' | 'duplicate' | 'trued_up' | 'conflict'> {
   try {
     await ddb.send(usageTransaction(table, r));
     return 'recorded';
   } catch (err) {
+    if (r.reservedMicroUsd !== undefined) return inspectSettled(ddb, table, r, err);
     if (isAlreadyRecorded(err)) return 'duplicate';
     throw err;
   }
+}
+
+/** Why a FairMeter settle or release was refused: the EVENT (consistent read) decides. */
+async function inspectSettled(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord, err: unknown) {
+  const e = err as { name?: string; CancellationReasons?: { Code?: string }[] };
+  const conflict = (reason: string) => {
+    console.error('RECORD_CONFLICT', { appId: r.appId, requestId: r.requestId, sub: r.sub, reason, record: r });
+    return 'conflict' as const;
+  };
+  // Same token, different parameters, within DynamoDB's 10-minute idempotency window.
+  if (e?.name === 'IdempotentParameterMismatchException') return conflict('another payload for this call within the token window');
+  // Only the EVENT put and the PENDING delete carry conditions.
+  if (!(e?.name === 'TransactionCanceledException' && e.CancellationReasons?.some((c) => c.Code === 'ConditionalCheckFailed'))) throw err;
+  const { Item: event } = await ddb.send(new GetCommand({ TableName: table, Key: keys.event(r.sub, r.requestTime, r.appId, r.requestId), ConsistentRead: true }));
+  // No EVENT and no PENDING: the hold was released. A second release is a repeat; a settle is not.
+  if (!event) return r.release ? 'duplicate' : conflict('the reservation was already released');
+  if (event.usageHash === r.usageHash) return 'duplicate';
+  if (event.estimated === 'swept' && r.estimated !== 'swept') return trueUp(ddb, table, r, event);
+  return conflict('the call was already settled with another payload');
+}
+
+/** The sweeper estimated this call; the real usage arrived later. The difference is an ADJUST. */
+async function trueUp(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord, event: Record<string, any>) {
+  const oldCost = Number(event.costMicroUsd);
+  const newCost = r.release ? 0 : r.costMicroUsd;
+  const outcome = await applyAdjustment(ddb, table, {
+    appId: r.appId,
+    sub: r.sub,
+    eventSk: skOf(event),
+    eventTime: r.requestTime,
+    legacyEvent: false,
+    kind: r.kind,
+    sku: String(r.details.sku ?? event.sku),
+    reason: 'late-usage',
+    oldPricingVersion: String(event.pricingVersion),
+    newPricingVersion: r.pricingVersion,
+    oldCostMicroUsd: oldCost,
+    newCostMicroUsd: newCost,
+    deltaMicroUsd: newCost - oldCost,
+    // Deterministic, so a retry sends the same parameters under the same token.
+    createdAt: r.requestTime,
+    deductCredit: false,
+    details: { ...r.details, ...(r.usageHash ? { usageHash: r.usageHash } : {}), ...(r.release ? { release: true } : {}) },
+  });
+  if (outcome === 'duplicate') return 'duplicate';
+  console.warn('LATE_USAGE', { appId: r.appId, requestId: r.requestId, sub: r.sub, deltaMicroUsd: newCost - oldCost });
+  return 'trued_up';
 }
