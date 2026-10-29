@@ -44,6 +44,8 @@ export interface Adjustment {
   newCostMicroUsd: number;
   /** newCostMicroUsd - oldCostMicroUsd: negative is a refund. */
   deltaMicroUsd: number;
+  /** FairMeter true-ups: the change in what the operator absorbs (new outcome's minus the EVENT's). */
+  absorbedMicroUsd?: number;
   createdAt: string;
   /** Legacy prepaid households paid from the credit balance, so the delta goes back there too. */
   deductCredit: boolean;
@@ -82,13 +84,14 @@ export function adjustmentTransaction(table: string, a: Adjustment) {
   checkReason(a.reason);
   if (a.deductCredit && a.householdId === undefined) throw new Error(`No household credit to correct for ${a.eventSk}`);
   const id = adjustmentId(a.reason, a.eventSk);
+  const absorbed = a.absorbedMicroUsd !== undefined;
   const counter = (key: TableKey) => ({
     Update: {
       TableName: table,
       Key: key,
-      UpdateExpression: 'ADD costMicroUsd :delta, adjustmentsMicroUsd :delta',
+      UpdateExpression: `ADD costMicroUsd :delta, adjustmentsMicroUsd :delta${absorbed ? ', absorbedMicroUsd :absorbed' : ''}`,
       ConditionExpression: pkExists(),
-      ExpressionAttributeValues: { ':delta': a.deltaMicroUsd },
+      ExpressionAttributeValues: { ':delta': a.deltaMicroUsd, ...(absorbed ? { ':absorbed': a.absorbedMicroUsd } : {}) },
     },
   });
   return new TransactWriteCommand({
@@ -116,6 +119,7 @@ export function adjustmentTransaction(table: string, a: Adjustment) {
             oldCostMicroUsd: a.oldCostMicroUsd,
             newCostMicroUsd: a.newCostMicroUsd,
             deltaMicroUsd: a.deltaMicroUsd,
+            ...(absorbed ? { absorbedMicroUsd: a.absorbedMicroUsd } : {}),
             createdAt: a.createdAt,
           },
           ConditionExpression: pkNotExists(),

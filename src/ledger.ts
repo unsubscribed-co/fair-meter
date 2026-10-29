@@ -61,6 +61,13 @@ export interface UsageRecord {
   release?: boolean;
 }
 
+/**
+ * What the operator absorbs of a settle: the whole cost of an attempt that didn't serve the person
+ * (swept, aborted). It still counts toward the cap; the person is charged cost minus absorbed.
+ */
+export const absorbedOf = (r: Pick<UsageRecord, 'estimated' | 'release' | 'costMicroUsd'>) =>
+  !r.release && (r.estimated === 'swept' || r.estimated === 'aborted') ? r.costMicroUsd : 0;
+
 /** DynamoDB idempotency token (max 36 chars) derived from app and request id. */
 export const clientRequestToken = (appId: string, requestId: string) =>
   createHash('sha256').update(`${appId}#${requestId}`).digest('hex').slice(0, 32);
@@ -118,6 +125,11 @@ export function usageTransaction(table: string, r: UsageRecord) {
     ExpressionAttributeValues: { ...meterValues, ':cost': r.costMicroUsd },
   };
   const counter = (key: TableKey) => ({ Update: { TableName: table, Key: key, ...counters } });
+  // Only the person's day and month carry what the operator absorbed.
+  const absorbed = absorbedOf(r);
+  const personal = absorbed
+    ? { UpdateExpression: `${counters.UpdateExpression}, absorbedMicroUsd :absorbed`, ExpressionAttributeValues: { ...counters.ExpressionAttributeValues, ':absorbed': absorbed } }
+    : counters;
   if (r.householdId === undefined && (r.deductCredit || r.householdMonthMarks)) throw new Error(`No household to charge: ${r.requestId}`);
   const provider = recordProvider(r);
   const freeTier = r.providerMonth;
@@ -169,11 +181,12 @@ export function usageTransaction(table: string, r: UsageRecord) {
             ...(held !== undefined ? { reservedMicroUsd: held } : {}),
             ...(r.usageHash !== undefined ? { usageHash: r.usageHash } : {}),
             ...(r.estimated !== undefined ? { estimated: r.estimated } : {}),
+            ...(absorbed ? { absorbedMicroUsd: absorbed } : {}),
           },
           ConditionExpression: pkNotExists(),
         },
       },
-      counter(keys.userMonth(r.sub, r.appId, month)),
+      { Update: { TableName: table, Key: keys.userMonth(r.sub, r.appId, month), ...personal } },
       held === undefined
         ? counter(keys.userDay(r.sub, r.appId, day))
         : {
@@ -181,8 +194,8 @@ export function usageTransaction(table: string, r: UsageRecord) {
               TableName: table,
               Key: keys.userDay(r.sub, r.appId, day),
               // The hold becomes the actual cost: committed (the cap's attribute) moves by the difference.
-              UpdateExpression: `${counters.UpdateExpression}, committedMicroUsd :held`,
-              ExpressionAttributeValues: { ...counters.ExpressionAttributeValues, ':held': r.costMicroUsd - held },
+              UpdateExpression: `${personal.UpdateExpression}, committedMicroUsd :held`,
+              ExpressionAttributeValues: { ...personal.ExpressionAttributeValues, ':held': r.costMicroUsd - held },
             },
           },
       ...householdMonth,
@@ -312,6 +325,8 @@ async function trueUp(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord
     oldCostMicroUsd: oldCost,
     newCostMicroUsd: newCost,
     deltaMicroUsd: newCost - oldCost,
+    // A late real usage charges the person; a late 'not_billed' leaves them at $0.
+    absorbedMicroUsd: absorbedOf(r) - Number(event.absorbedMicroUsd ?? 0),
     // Deterministic, so a retry sends the same parameters under the same token.
     createdAt: r.requestTime,
     deductCredit: false,
