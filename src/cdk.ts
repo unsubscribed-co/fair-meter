@@ -678,7 +678,7 @@ export class Metering extends Construct {
    * makes CDK add its log-retention custom resource.
    */
   grant(fn: lambda.Function): void {
-    this.table.grant(fn, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
+    this.table.grant(fn, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
     this.retry.queue.grantSendMessages(fn);
     fn.addEnvironment('FAIR_METER', cdk.Stack.of(this).toJsonString(this.config));
     this.watchErrors(fn);

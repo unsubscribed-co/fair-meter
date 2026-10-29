@@ -57,10 +57,10 @@ test('the FAIR_METER env: the whole config as JSON, tokens resolved by CloudForm
   expect(json).toContain('QueueUrl');
 });
 
-test('the app function may reserve, settle and queue', () => {
+test('the app function may reserve, settle, read usage and queue', () => {
   const { t } = synth();
   const policies = JSON.stringify(t.findResources('AWS::IAM::Policy'));
-  for (const action of ['dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'sqs:SendMessage']) expect(policies).toContain(action);
+  for (const action of ['dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'sqs:SendMessage']) expect(policies).toContain(action);
 });
 
 test("grant(fn), the retry Lambda and the sweeper reach the ledger table only, never the app's", () => {
