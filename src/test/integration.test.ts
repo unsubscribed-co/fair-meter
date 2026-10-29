@@ -160,7 +160,7 @@ suite('★ FairMeter against DynamoDB Local', () => {
     const call = (await meter().authorize(ask('t15@x.co'))) as Reservation;
     expect(await meter().record(call, { input_tokens: 0, output_tokens: 20_000 })).toBe('recorded');
     expect(await day('t15@x.co')).toMatchObject({ committedMicroUsd: 10_000, costMicroUsd: 10_000 });
-    expect(console.warn).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.anything());
+    expect(console.error).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.anything());
   });
 
   /** A client whose reserve transactions commit, then report a failure `times` times (a lost response). */
