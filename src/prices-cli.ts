@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import type { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { computeUnitCost, formatUsd, METER_NAMES, type Meters } from './cost';
@@ -21,8 +22,11 @@ import { isProvider } from './usage';
  *       Prices each action in prices/apps/<app>.json at AWS's public Price List (no credentials),
  *       plus the fee. --write appends a version to each SKU whose rates changed and writes
  *       prices/apps/<app>.list.json.
+ *   npx tsx node_modules/fair-meter/src/prices-cli.ts measure <app> --log-group <dev group> --start <iso> --end <iso>
+ *       Averages what each action used in dev (measure mode's action lines, Lambda's reports, the
+ *       bytes logged) into prices/apps/<app>.json, keeping its profiles. Needs @aws-sdk/client-cloudwatch-logs.
  *
- * Credentials (sync, price-history): the AWS SDK's usual chain (AWS_PROFILE, ...).
+ * Credentials (sync, price-history, measure with dev's): the AWS SDK's usual chain (AWS_PROFILE, ...).
  */
 
 export const PRICES_DIR = path.join(__dirname, '..', 'prices');
@@ -366,6 +370,124 @@ export function writePriceList(dir: string, list: PriceList, validFrom: string, 
   return lines;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The measurement: what each action used in dev, from the app's own logs (see measureCapacity).
+
+/** Logs Insights returns at most this many rows per query. */
+const QUERY_LIMIT = 10_000;
+
+/** A line's request id, in Lambda's text or JSON log format; raw stdout lines (the action line) have none. */
+function requestIdOf(message: string, json: any): string | undefined {
+  if (json) return json.requestId ?? json.record?.requestId;
+  return (/^(?:START|END|REPORT) RequestId: (\S+)/.exec(message) ?? /^[^\t]+\t([0-9a-f-]{36})\t/.exec(message))?.[1];
+}
+
+/** Billed ms and memory MB from Lambda's report line, in either log format. */
+function reportOf(message: string, json: any): { billedMs: number; memoryMb: number } | undefined {
+  if (json?.type === 'platform.report') return { billedMs: json.record.metrics.billedDurationMs, memoryMb: json.record.metrics.memorySizeMB };
+  const billed = /^REPORT .*Billed Duration: (\d+) ms/.exec(message);
+  const memory = /Memory Size: (\d+) MB/.exec(message);
+  return billed && memory ? { billedMs: Number(billed[1]), memoryMb: Number(memory[1]) } : undefined;
+}
+
+/**
+ * Runs one Logs Insights query over the dev log group, groups its lines by request, and averages
+ * per action SKU into prices/apps/<app>.json (a new file gets empty profiles; an existing one keeps
+ * its region, profiles and the SKUs not measured this time). Returns the lines to print.
+ */
+export async function measureApp(
+  logs: CloudWatchLogsClient, app: string, run: { logGroup: string; start: Date; end: Date }, now: Date, dir = PRICES_DIR,
+): Promise<string[]> {
+  // An optional peer: only measure needs it.
+  const { StartQueryCommand, GetQueryResultsCommand } = await import('@aws-sdk/client-cloudwatch-logs');
+  const { queryId } = await logs.send(new StartQueryCommand({
+    logGroupName: run.logGroup,
+    startTime: Math.floor(run.start.getTime() / 1000),
+    endTime: Math.ceil(run.end.getTime() / 1000),
+    queryString: 'fields @timestamp, @logStream, @message | sort @timestamp asc',
+    limit: QUERY_LIMIT,
+  }));
+  let reply;
+  while ((reply = await logs.send(new GetQueryResultsCommand({ queryId }))).status !== 'Complete') {
+    if (reply.status !== 'Running' && reply.status !== 'Scheduled') throw new Error(`Logs Insights query ${reply.status}`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  const results = reply.results ?? [];
+  if (results.length >= QUERY_LIMIT) throw new Error(`${QUERY_LIMIT} lines or more: narrow --start and --end`);
+
+  // Group by request. A line without a request id belongs to the request open in its log stream.
+  // shortcut: one request at a time per log stream (a Lambda environment); revisit if dev runs multi-concurrency Lambda Managed Instances.
+  type Request = { bytes: number; actions: { sku: string; n: number; rru?: number; wru?: number }[]; report?: { billedMs: number; memoryMb: number } };
+  const requests = new Map<string, Request>();
+  const open = new Map<string, string>();
+  for (const row of results) {
+    const field = (name: string) => row.find((f) => f.field === name)?.value ?? '';
+    const message = field('@message');
+    const stream = field('@logStream');
+    let json: any;
+    try { json = message.startsWith('{') ? JSON.parse(message) : undefined; } catch { /* a text line */ }
+    const id = requestIdOf(message, json) ?? open.get(stream);
+    if (!id) continue;
+    open.set(stream, id);
+    const r = requests.get(id) ?? { bytes: 0, actions: [] };
+    requests.set(id, r);
+    r.bytes += Buffer.byteLength(message);
+    if (json?.fairMeter === 'action') r.actions.push(json);
+    const report = reportOf(message, json);
+    if (report) {
+      r.report = report;
+      open.delete(stream);
+    }
+  }
+
+  // Per action: its own units, and an n-weighted share of its request (one API request, one invocation, its billed time and log bytes).
+  const sums = new Map<string, { n: number; samples: number; rru: number; wru: number; units: boolean; requests: number; billedMs: number; memoryMbN: number; logBytes: number }>();
+  for (const r of requests.values()) {
+    if (!r.report || !r.actions.length) continue;
+    const total = r.actions.reduce((sum, a) => sum + a.n, 0);
+    for (const a of r.actions) {
+      const s = sums.get(a.sku) ?? { n: 0, samples: 0, rru: 0, wru: 0, units: false, requests: 0, billedMs: 0, memoryMbN: 0, logBytes: 0 };
+      sums.set(a.sku, s);
+      const share = a.n / total;
+      s.n += a.n;
+      s.samples += 1;
+      s.rru += a.rru ?? 0;
+      s.wru += a.wru ?? 0;
+      s.units ||= a.rru !== undefined || a.wru !== undefined;
+      s.requests += share;
+      s.billedMs += share * r.report.billedMs;
+      s.memoryMbN += a.n * r.report.memoryMb;
+      s.logBytes += share * r.bytes;
+    }
+  }
+  if (!sums.size) throw new Error(`no action lines with a Lambda report in ${run.logGroup} between ${pricingTime(run.start)} and ${pricingTime(run.end)}`);
+  // Averages round up to 3 decimals: a measurement must not underprice.
+  const up = (x: number) => Math.ceil(Number((x * 1000).toPrecision(12))) / 1000;
+  const measured: AppFile['actions'] = {};
+  for (const [sku, s] of sums) {
+    if (!s.units) throw new Error(`${sku}: no rru or wru on its action lines; wrap the app's DynamoDB client with measureCapacity in dev`);
+    const avg = (x: number) => up(x / s.n);
+    measured[sku] = {
+      rru: avg(s.rru), wru: avg(s.wru), apiRequests: avg(s.requests), lambdaRequests: avg(s.requests),
+      billedMs: avg(s.billedMs), memoryMb: avg(s.memoryMbN), logBytes: avg(s.logBytes), samples: s.samples, measuredAt: pricingTime(now),
+    };
+  }
+
+  const file = path.join(dir, 'apps', `${app}.json`);
+  const current = existsSync(file) ? parseAppFile(app, readFileSync(file, 'utf8')) : undefined;
+  const empty = { actions: {}, ai: {} };
+  const next: AppFile = {
+    region: current?.region ?? await logs.config.region(),
+    actions: { ...current?.actions, ...measured },
+    profiles: current?.profiles ?? { light: empty, regular: empty, heavy: empty },
+  };
+  const text = JSON.stringify(next, null, 2) + '\n';
+  parseAppFile(app, text);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, text);
+  return [...[...sums].map(([sku, s]) => `${sku}: ${s.samples} samples`), `prices/apps/${app}.json written`];
+}
+
 const itemOf = (f: PriceFile, v: PriceFile['versions'][number]) => ({ provider: f.provider, ...v });
 
 /** A stored version as the file would write it: without its keys and the range close sync adds. */
@@ -478,8 +600,17 @@ export function formatPriceHistory(sku: string, items: Record<string, any>[]): s
 
 async function main(argv: string[]) {
   const [command, ...rest] = argv;
-  const { positional, flags } = parseFlags(rest, { values: ['table', 'keys', 'valid-from'], booleans: ['dry-run', 'write'] });
-  const usage = 'sync --table <name> [--keys pk,sk] [--dry-run]  |  price-history <sku> --table <name> [--keys pk,sk]  |  list <app> [--write --valid-from <iso>]';
+  const { positional, flags } = parseFlags(rest, { values: ['table', 'keys', 'valid-from', 'log-group', 'start', 'end'], booleans: ['dry-run', 'write'] });
+  const usage = 'sync --table <name> [--keys pk,sk] [--dry-run]  |  price-history <sku> --table <name> [--keys pk,sk]  |  list <app> [--write --valid-from <iso>]' +
+    '  |  measure <app> --log-group <name> --start <iso> --end <iso>';
+  if (command === 'measure') {
+    if (positional.length !== 1 || typeof flags['log-group'] !== 'string' || typeof flags.start !== 'string' || typeof flags.end !== 'string') throw new Error(`Usage: ${usage}`);
+    const [start, end] = [flags.start, flags.end].map((t) => new Date(parseValidFrom(t)));
+    if (start >= end) throw new Error('--start must be before --end');
+    const { CloudWatchLogsClient } = await import('@aws-sdk/client-cloudwatch-logs');
+    for (const line of await measureApp(new CloudWatchLogsClient({}), checkAppId(positional[0]), { logGroup: flags['log-group'], start, end }, new Date())) console.log(line);
+    return;
+  }
   if (command === 'list') {
     if (positional.length !== 1 || (flags.write === true) !== (typeof flags['valid-from'] === 'string')) throw new Error(`Usage: ${usage}`);
     const app = checkAppId(positional[0]);

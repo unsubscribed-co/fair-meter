@@ -138,6 +138,19 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts list <app> [--write --valid-fr
 
 `list` downloads the region's public Price List offer files (DynamoDB, Lambda, API Gateway, CloudWatch) and takes each first-tier on-demand list rate, no free tier; a rate it can't find stops the run, naming it. Per action, each component per 1,000 actions, rounded up: database = `rru` plus the write check's half read unit at the read request rate, plus `wru` at the write request rate; API = `apiRequests` at the HTTP API rate; compute = `lambdaRequests` at the Arm request rate plus `billedMs` x `memoryMb` as Arm GB-seconds; logs = `logBytes` ingested plus the same bytes scanned once by the rollup (GB = 2^30 bytes); other = 0. It prints each line (components, cost, fee from `prices/fee.json`, price) and per profile the monthly cost (30 days), the price with the fee and how many days $2 lasts; AI calls are priced at their SKU's current version. `--write` appends a version starting at `--valid-from` to each `prices/<sku>.json` whose rates differ from its latest version (creating the file for a new SKU; a version is never edited), refuses a `validFrom` less than 10 minutes ahead, and writes the published list, `prices/apps/<app>.list.json`. Then `sync`.
 
+**Measuring an app.** The measurement comes from the app's dev stage, never from guesses:
+
+1. In dev only, wrap the DynamoDB client the app's handlers use: `measureCapacity(ddb)` (a `DynamoDBClient` or the `DynamoDBDocumentClient` over it). Every command then asks for `ReturnConsumedCapacity: 'TOTAL'` and its read and write units are tallied; the next `action()` line carries them as `rru` and `wru` and resets the tally. Never wrap it in prod, and don't wrap a client you also give to `FairMeter` (the write check's half read unit is priced separately). Without the wrapper the action line is unchanged.
+2. Run the app's measurement scenarios against dev: requests that do each action the way people do. The scenarios live in the app's repo, not here.
+3. With dev credentials and `@aws-sdk/client-cloudwatch-logs` installed:
+
+   ```sh
+   npx tsx node_modules/fair-meter/src/prices-cli.ts measure <app> --log-group <dev function's log group> --start <iso> --end <iso>
+   ```
+
+   One Logs Insights query reads the window's lines (at most 10,000; narrow the window otherwise) and groups them by request: the action lines, Lambda's report (`Billed Duration`, `Memory Size`, in the text or the JSON log format) and the bytes of every line. A line without a request id (the action line is raw stdout) belongs to the request open in its log stream. Per action SKU it averages, per action: `rru` and `wru` from the lines, and an `n`-weighted share of the request's API request, invocation, billed ms and log bytes. Averages are rounded up to 3 decimals. It updates that SKU's measurement in `prices/apps/<app>.json` with `samples` and `measuredAt`, keeping the profiles and the SKUs not measured this time (a new file gets empty profiles to fill in). Action lines without `rru`/`wru` stop the run: the client wasn't wrapped.
+4. Fill or check the profiles, then `list` (and `list --write --valid-from <iso>` for a new price version).
+
 ### Actions
 
 An action is something a person does that costs AWS money but no provider call (StackSplit's "new expense"). It is reported as a log line, never a write, and a scheduled rollup turns the lines into EVENTs at the action SKU's price. Two calls around each write:
@@ -149,7 +162,7 @@ await saveExpense(...);
 meter.action({ person, sku: 'stacksplit-new-expense' }); // after the write succeeded; { n } for several
 ```
 
-**`action({ person, sku, n = 1 })`** is synchronous, never throws and does no I/O but one JSON line written straight to stdout as its own log event: `{"fairMeter":"action","appId","env","person","sku","n"}`. It also counts `n` for the person in this instance's current UTC minute. An SKU not in `actions.skus`, or `n` not an integer from 1 to 1000, logs `ACTION_UNKNOWN` (alarms) and writes no line.
+**`action({ person, sku, n = 1 })`** is synchronous, never throws and does no I/O but one JSON line written straight to stdout as its own log event: `{"fairMeter":"action","appId","env","person","sku","n"}` (plus `rru` and `wru` in dev with `measureCapacity`, see "Measuring an app"). It also counts `n` for the person in this instance's current UTC minute. An SKU not in `actions.skus`, or `n` not an integer from 1 to 1000, logs `ACTION_UNKNOWN` (alarms) and writes no line.
 
 **`canWrite(person, n = 1)`** returns `{ ok: true }` or a refusal like `authorize`'s, and never throws:
 - the person's actions this UTC minute on this instance plus `n` above `perPersonPerMinute`: `too_many_requests` (429, `Retry-After` to the next minute), logged `RATE_LIMITED` (warn), no read;

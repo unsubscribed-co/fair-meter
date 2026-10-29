@@ -8,6 +8,7 @@ export * from './free-tier';
 export * from './keys';
 export * from './ledger';
 export * from './limits';
+export * from './measure';
 export * from './meter';
 export * from './platform';
 export * from './pricing';
