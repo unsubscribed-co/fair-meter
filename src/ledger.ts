@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { applyAdjustment } from './adjust';
+import { adjustmentId, applyAdjustment } from './adjust';
 import { keys, pkExists, pkNotExists, skOf, type TableKey } from './keys';
 
 /**
@@ -264,13 +264,15 @@ export async function recordUsage(
   }
 }
 
+/** Logged at error level: the metric filters on the app and retry Lambdas alarm on it. */
+function conflict(r: UsageRecord, reason: string) {
+  console.error('RECORD_CONFLICT', { appId: r.appId, requestId: r.requestId, sub: r.sub, reason, record: r });
+  return 'conflict' as const;
+}
+
 /** Why a FairMeter settle or release was refused: the EVENT (consistent read) decides. */
 async function inspectSettled(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord, err: unknown) {
   const e = err as { name?: string; CancellationReasons?: { Code?: string }[] };
-  const conflict = (reason: string) => {
-    console.error('RECORD_CONFLICT', { appId: r.appId, requestId: r.requestId, sub: r.sub, reason, record: r });
-    return 'conflict' as const;
-  };
   // Same token, other parameters, within DynamoDB's 10-minute idempotency window (e.g. real usage
   // right after the sweeper's estimate). The token's other use may or may not have committed.
   const mismatch = e?.name === 'IdempotentParameterMismatchException';
@@ -284,21 +286,22 @@ async function inspectSettled(ddb: DynamoDBDocumentClient, table: string, r: Usa
     // Nothing settled under the token yet: queue it; after the window the condition decides.
     if (mismatch) throw err;
     // No EVENT and no PENDING: the hold was released. A second release is a repeat; a settle is not.
-    return r.release ? 'duplicate' : conflict('the reservation was already released');
+    return r.release ? 'duplicate' : conflict(r, 'the reservation was already released');
   }
   if (event.usageHash === r.usageHash) return 'duplicate';
   if (event.estimated === 'swept') return trueUp(ddb, table, r, event);
-  return conflict('the call was already settled with another payload');
+  return conflict(r, 'the call was already settled with another payload');
 }
 
 /** The sweeper estimated this call; the real usage arrived later. The difference is an ADJUST. */
 async function trueUp(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord, event: Record<string, any>) {
   const oldCost = Number(event.costMicroUsd);
   const newCost = r.release ? 0 : r.costMicroUsd;
-  const outcome = await applyAdjustment(ddb, table, {
+  const eventSk = skOf(event);
+  const adjustment = {
     appId: r.appId,
     sub: r.sub,
-    eventSk: skOf(event),
+    eventSk,
     eventTime: r.requestTime,
     legacyEvent: false,
     kind: r.kind,
@@ -313,8 +316,25 @@ async function trueUp(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord
     createdAt: r.requestTime,
     deductCredit: false,
     details: { ...r.details, ...(r.usageHash ? { usageHash: r.usageHash } : {}), ...(r.release ? { release: true } : {}) },
-  });
-  if (outcome === 'duplicate') return 'duplicate';
+  };
+  let outcome;
+  let mismatchErr: unknown;
+  try {
+    outcome = await applyAdjustment(ddb, table, adjustment);
+  } catch (err) {
+    if ((err as { name?: string }).name !== 'IdempotentParameterMismatchException') throw err;
+    outcome = 'mismatch' as const;
+    mismatchErr = err;
+  }
+  if (outcome !== 'applied') {
+    // One true-up per call: a repeat of it is a duplicate, any other late payload a conflict.
+    const id = adjustmentId(adjustment.reason, eventSk);
+    const { Item: prior } = await ddb.send(new GetCommand({ TableName: table, Key: keys.adjustment(r.sub, r.requestTime, r.appId, id), ConsistentRead: true }));
+    // Inside the token window with nothing written yet: queue it; after the window the condition decides.
+    if (!prior && outcome === 'mismatch') throw mismatchErr;
+    if (prior?.usageHash === r.usageHash) return 'duplicate';
+    return conflict(r, 'a late payload was already trued up');
+  }
   console.warn('LATE_USAGE', { appId: r.appId, requestId: r.requestId, sub: r.sub, deltaMicroUsd: newCost - oldCost });
   return 'trued_up';
 }

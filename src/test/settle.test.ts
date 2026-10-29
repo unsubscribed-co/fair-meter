@@ -136,9 +136,35 @@ describe('recordUsage on the new path', () => {
       { pk: 'USER#ana@x.co', sk: 'DAILY#stacksplit#2026-11-03' },
     ]);
     expect(console.warn).toHaveBeenCalledWith('LATE_USAGE', expect.objectContaining({ deltaMicroUsd: 440 - 5_798 }));
-    // The same late usage again: the ADJUST key is deterministic, so it is refused.
+    // The same late usage again: the ADJUST key is deterministic, so it is refused, and its usageHash matches.
     ddbMock.on(TransactWriteCommand).rejects(cancelled('ConditionalCheckFailed', 'None', 'None', 'None', 'None', 'None', 'ConditionalCheckFailed'));
+    ddbMock.on(GetCommand).callsFake(({ Key }) => ({ Item: String(Key.sk).startsWith('ADJUST#') ? put.Item : { ...eventKey, usageHash: 'h-swept', estimated: 'swept', costMicroUsd: 5_798 } }));
     expect(await recordUsage(ddb(), 't', settle)).toBe('duplicate');
+  });
+
+  test('M1: after one true-up, a different late payload (or not_billed) is a conflict; the same one a duplicate', async () => {
+    const swept = { ...eventKey, usageHash: 'h-swept', estimated: 'swept', costMicroUsd: 5_798, pricingVersion: settle.pricingVersion };
+    let adjust: Record<string, unknown> | undefined = { usageHash: 'h-actual' };
+    const reads = () => ddbMock.on(GetCommand).callsFake(({ Key }) => ({ Item: String(Key.sk).startsWith('ADJUST#') ? adjust : swept }));
+    const refusedBoth = cancelled('ConditionalCheckFailed', 'None', 'None', 'None', 'None', 'None', 'ConditionalCheckFailed');
+    reads();
+    // The settle is refused (swept) and so is the ADJUST put (already trued up once).
+    ddbMock.on(TransactWriteCommand).rejects(refusedBoth);
+    expect(await recordUsage(ddb(), 't', settle)).toBe('duplicate');
+    expect(await recordUsage(ddb(), 't', { ...settle, costMicroUsd: 999, usageHash: 'h-other' })).toBe('conflict');
+    expect(await recordUsage(ddb(), 't', release)).toBe('conflict');
+    expect(console.error).toHaveBeenCalledWith('RECORD_CONFLICT', expect.objectContaining({ reason: expect.stringContaining('trued up') }));
+    const adjustRead = ddbMock.commandCalls(GetCommand).map((c) => c.args[0].input).find((i) => String(i.Key!.sk).startsWith('ADJUST#'))!;
+    expect(adjustRead.ConsistentRead).toBe(true);
+    expect(adjustRead.Key!.sk).toMatch(/^ADJUST#2026-11-03T14:05:09.120Z#stacksplit#[0-9a-f]{32}$/);
+    // Inside the ADJUST's token window it is a mismatch: another ADJUST is a conflict, none yet is thrown (queued).
+    const mismatch = Object.assign(new Error('adjust mismatch'), { name: 'IdempotentParameterMismatchException' });
+    ddbMock.reset();
+    reads();
+    ddbMock.on(TransactWriteCommand).rejectsOnce(refusedBoth).rejectsOnce(mismatch).rejectsOnce(refusedBoth).rejectsOnce(mismatch);
+    expect(await recordUsage(ddb(), 't', { ...settle, usageHash: 'h-other' })).toBe('conflict');
+    adjust = undefined;
+    await expect(recordUsage(ddb(), 't', { ...settle, usageHash: 'h-other' })).rejects.toThrow('adjust mismatch');
   });
 
   test('a release whose PENDING is gone: duplicate without an EVENT, conflict with one, a true-up to 0 after a sweep', async () => {
