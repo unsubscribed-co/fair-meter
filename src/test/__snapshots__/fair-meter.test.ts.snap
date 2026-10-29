@@ -1,0 +1,36 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`record T10: a settle that keeps failing is queued; the retry handler writes the identical transaction 1`] = `
+{
+  "appId": "stacksplit",
+  "baseCostMicroUsd": 440,
+  "costMicroUsd": 440,
+  "counters": {
+    "cacheReadTokens": 4000,
+    "cacheWriteTokens": 2000,
+    "inputTokens": 1000,
+    "outputTokens": 100,
+    "reasoningTokens": 0,
+  },
+  "deductCredit": false,
+  "details": {
+    "cacheReadTokens": 4000,
+    "cacheWriteTokens": 2000,
+    "inputTokens": 1000,
+    "outputTokens": 100,
+    "provider": "anthropic",
+    "reasoningTokens": 0,
+    "sku": "claude-haiku-5-5",
+  },
+  "env": "prod",
+  "kind": "tokens",
+  "markupBps": 0,
+  "paidBy": "credit",
+  "pricingVersion": "claude-haiku-5-5@2026-10-28T00:00:00Z",
+  "requestId": Any<String>,
+  "requestTime": Any<String>,
+  "reservedMicroUsd": 5798,
+  "sub": "ana@x.co",
+  "usageHash": Any<String>,
+}
+`;

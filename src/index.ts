@@ -3,6 +3,7 @@ export * from './adjust';
 export * from './budget';
 export * from './cost';
 export * from './export';
+export * from './fair-meter';
 export * from './free-tier';
 export * from './keys';
 export * from './ledger';
