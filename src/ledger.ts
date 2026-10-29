@@ -276,10 +276,12 @@ async function inspectSettled(ddb: DynamoDBDocumentClient, table: string, r: Usa
   // Only the EVENT put and the PENDING delete carry conditions.
   if (!(e?.name === 'TransactionCanceledException' && e.CancellationReasons?.some((c) => c.Code === 'ConditionalCheckFailed'))) throw err;
   const { Item: event } = await ddb.send(new GetCommand({ TableName: table, Key: keys.event(r.sub, r.requestTime, r.appId, r.requestId), ConsistentRead: true }));
+  // The sweeper lost a race to the app's own settle or release: the real outcome stands.
+  if (r.estimated === 'swept') return 'duplicate';
   // No EVENT and no PENDING: the hold was released. A second release is a repeat; a settle is not.
   if (!event) return r.release ? 'duplicate' : conflict('the reservation was already released');
   if (event.usageHash === r.usageHash) return 'duplicate';
-  if (event.estimated === 'swept' && r.estimated !== 'swept') return trueUp(ddb, table, r, event);
+  if (event.estimated === 'swept') return trueUp(ddb, table, r, event);
   return conflict('the call was already settled with another payload');
 }
 

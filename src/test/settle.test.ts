@@ -150,6 +150,16 @@ describe('recordUsage on the new path', () => {
     expect(await recordUsage(ddb(), 't', settle)).toBe('conflict');
   });
 
+  test('#23: the sweeper losing the race to the real settle or release is a duplicate, not a conflict', async () => {
+    const swept = { ...settle, estimated: 'swept' as const, usageHash: 'h-swept' };
+    ddbMock.on(TransactWriteCommand).rejects(cancelled('ConditionalCheckFailed', 'None', 'None', 'None', 'None', 'None', 'ConditionalCheckFailed'));
+    event({ ...eventKey, usageHash: 'h-actual' });
+    expect(await recordUsage(ddb(), 't', swept)).toBe('duplicate');
+    event(undefined);
+    expect(await recordUsage(ddb(), 't', swept)).toBe('duplicate');
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
   test('anything else throws (the caller queues it)', async () => {
     ddbMock.on(TransactWriteCommand).rejects(cancelled('None', 'TransactionConflict'));
     await expect(recordUsage(ddb(), 't', settle)).rejects.toThrow('cancelled');
