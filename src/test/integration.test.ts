@@ -260,6 +260,59 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect(await get('TOKEN#probe', 'written')).toBeDefined();
   });
 
+  describe('usage(person)', () => {
+    const CAP = config.dailyCapMicroUsd;
+    const resets = { day: '2026-11-04T00:00:00.000Z', month: '2026-12-01T00:00:00.000Z' };
+
+    test('no rows: zeros, the full cap as room, normal', async () => {
+      expect(await meter().usage('u-none@x.co')).toEqual({
+        day: { spentMicroUsd: 0, heldMicroUsd: 0, capMicroUsd: CAP, roomMicroUsd: CAP, resetsAt: resets.day },
+        month: { spentMicroUsd: 0, resetsAt: resets.month },
+        tier: 'normal',
+      });
+    });
+
+    test('after a hold: held is the reservation, nothing spent yet', async () => {
+      await meter().authorize(ask('u-hold@x.co'));
+      expect(await meter().usage('u-hold@x.co')).toEqual({
+        day: { spentMicroUsd: 0, heldMicroUsd: RESERVED, capMicroUsd: CAP, roomMicroUsd: CAP - RESERVED, resetsAt: resets.day },
+        month: { spentMicroUsd: 0, resetsAt: resets.month },
+        tier: 'normal',
+      });
+    });
+
+    test('after a settle: spent is the cost, nothing held', async () => {
+      const call = (await meter().authorize(ask('u-settle@x.co'))) as Reservation;
+      await meter().record(call, usage);
+      expect(await meter().usage('u-settle@x.co')).toMatchObject({
+        day: { spentMicroUsd: 440, heldMicroUsd: 0, roomMicroUsd: CAP - 440 },
+        month: { spentMicroUsd: 440 },
+      });
+    });
+
+    test('an absorbed attempt: counted toward the cap, not in what the person spent', async () => {
+      const served = (await meter().authorize(ask('u-abs@x.co'))) as Reservation;
+      await meter().record(served, usage);
+      const aborted = (await meter().authorize(ask('u-abs@x.co'))) as Reservation;
+      await meter().record(aborted, 'unknown');
+      expect(await meter().usage('u-abs@x.co')).toMatchObject({
+        day: { spentMicroUsd: 440, heldMicroUsd: 0, roomMicroUsd: CAP - 440 - RESERVED },
+        month: { spentMicroUsd: 440 },
+      });
+    });
+
+    test('across a UTC day change: a new day, the same month', async () => {
+      clock = new Date('2026-11-03T23:59:00.000Z');
+      await meter().record((await meter().authorize(ask('u-midnight@x.co'))) as Reservation, usage);
+      clock = new Date('2026-11-04T00:00:01.000Z');
+      expect(await meter().usage('u-midnight@x.co')).toEqual({
+        day: { spentMicroUsd: 0, heldMicroUsd: 0, capMicroUsd: CAP, roomMicroUsd: CAP, resetsAt: '2026-11-05T00:00:00.000Z' },
+        month: { spentMicroUsd: 440, resetsAt: resets.month },
+        tier: 'normal',
+      });
+    });
+  });
+
   test('T18: reserved at 23:59:59.900, settled after midnight: the earlier day and month', async () => {
     clock = new Date('2026-11-30T23:59:59.900Z');
     const call = (await meter().authorize(ask('t18@x.co'))) as Reservation;

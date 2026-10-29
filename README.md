@@ -60,6 +60,21 @@ Outcomes: `recorded`, `duplicate`, `trued_up` (real usage after the sweeper's es
 
 If the reserve write fails ambiguously (a timeout or 5xx: it may have committed), `authorize` resends the identical write (same idempotency token) to learn the outcome. If it still can't tell, it refuses, releases any hold now, and queues a second release a minute later, so the sweeper never charges for a call that wasn't made.
 
+**`usage(person)`**, to show a person their own spend in real time. One strongly consistent `BatchGetItem` of their day row (today, UTC) and month row (this month, UTC):
+
+```ts
+const { day, month, tier } = await meter.usage(person);
+// day:   { spentMicroUsd, heldMicroUsd, capMicroUsd, roomMicroUsd, resetsAt }
+// month: { spentMicroUsd, resetsAt }
+```
+
+- `spentMicroUsd` is what the person paid: `costMicroUsd − absorbedMicroUsd`;
+- `heldMicroUsd` is the open holds of calls in flight: `committedMicroUsd − costMicroUsd`, at least 0 (an ADJUST doesn't move `committedMicroUsd`, so after a correction it is approximate);
+- `roomMicroUsd` is what is left under the daily cap: `capMicroUsd − committedMicroUsd`, at least 0;
+- `resetsAt` (ISO, UTC) is the next UTC midnight for the day and the first of next month for the month; `tier` is the one `authorize` would report.
+
+A person with no rows gets zeros and the whole cap as room. It moves no money, so unlike `authorize` it rejects on a read error. `Metering.grant(fn)` allows the read.
+
 **`Metering`** (`fair-meter/cdk`), once per app and stage:
 
 ```ts

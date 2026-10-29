@@ -1,6 +1,6 @@
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import type { SQSEvent } from 'aws-lambda';
 import { FairMeter, type FairMeterConfig, type Reservation } from '../fair-meter';
@@ -340,6 +340,27 @@ describe('record', () => {
   test('record never throws, even on a hold it cannot read', async () => {
     expect(await meter().record({ ok: true, tier: 'normal', callId: 'x', hold: {} as any }, anthropicUsage)).toBe('failed');
     expect(console.error).toHaveBeenCalledWith('USAGE_RECORD_FAILED', expect.anything());
+  });
+});
+
+describe('usage', () => {
+  test("one strongly consistent BatchGetItem of today's DAILY row and this month's USAGE row", async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { t: [] } });
+    await meter().usage('ana@x.co');
+    expect(ddbMock.calls()).toHaveLength(1);
+    expect(ddbMock.commandCalls(BatchGetCommand)[0].args[0].input).toEqual({
+      RequestItems: { t: { ConsistentRead: true, Keys: [{ pk: 'USER#ana@x.co', sk: 'DAILY#stacksplit#2026-11-03' }, { pk: 'USER#ana@x.co', sk: 'USAGE#stacksplit#2026-11' }] } },
+    });
+  });
+
+  test('rejects on a read error: it moves no money', async () => {
+    ddbMock.on(BatchGetCommand).rejects(new Error('ProvisionedThroughputExceededException'));
+    await expect(meter().usage('ana@x.co')).rejects.toThrow('ProvisionedThroughputExceededException');
+  });
+
+  test('rejects when DynamoDB leaves the keys unprocessed', async () => {
+    ddbMock.on(BatchGetCommand).resolves({ Responses: { t: [] }, UnprocessedKeys: { t: { Keys: [{ pk: 'USER#ana@x.co', sk: 'DAILY#stacksplit#2026-11-03' }] } } });
+    await expect(meter().usage('ana@x.co')).rejects.toThrow(/not processed/);
   });
 });
 
