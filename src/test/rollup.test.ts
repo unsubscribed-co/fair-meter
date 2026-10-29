@@ -126,11 +126,23 @@ suite('the action rollup against DynamoDB Local', () => {
     // The runs at 14:30, 14:45 and 15:00 never happened.
     expect(await rollup(ddb, cwl, cfg, GROUPS, at('2026-11-03T15:15:00Z'))).toEqual({ windows: 4, recorded: 2, duplicate: 0 });
     expect(queried()).toEqual(['2026-11-03T14:00:00.000Z', '2026-11-03T14:15:00.000Z', '2026-11-03T14:30:00.000Z', '2026-11-03T14:45:00.000Z']);
-    expect(console.error).toHaveBeenCalledWith('ROLLUP_LATE', expect.objectContaining({ appId: 'catchup', windowStart: '2026-11-03T14:00:00.000Z', minutesLate: 45 }));
+    expect(console.error).toHaveBeenCalledWith('ROLLUP_LATE', expect.objectContaining({ appId: 'catchup', windowStart: '2026-11-03T14:00:00.000Z', minutesLate: 30 }));
     // 1,234 + 2,000: the price changed at 14:30.
     expect(await day('catchup', cy)).toMatchObject({ costMicroUsd: 3_234, committedMicroUsd: 3_234, actions: 2_000, requests: 2 });
     // Counted in the AWS provider day too (shared by every test here, so at least this much).
     expect((await get('PROVIDER#aws', 'DAILY#2026-11-03'))?.baseCostMicroUsd).toBeGreaterThanOrEqual(3_234);
+  });
+
+  test('ROLLUP_LATE once a window is not settled within the rollup lag (45 minutes after its start), not before', async () => {
+    const cfg = cfgOf('late');
+    await rollup(ddb, cwl, cfg, GROUPS, at('2026-11-03T14:05:00Z'));
+    logs({});
+    // The 14:00 window, due at 14:30, run 10 minutes late: the floor still holds.
+    await rollup(ddb, cwl, cfg, GROUPS, at('2026-11-03T14:40:00Z'));
+    expect(console.error).not.toHaveBeenCalledWith('ROLLUP_LATE', expect.anything());
+    // The 14:15 window, first run at 15:01: past its 45 minutes.
+    await rollup(ddb, cwl, cfg, GROUPS, at('2026-11-03T15:01:00Z'));
+    expect(console.error).toHaveBeenCalledWith('ROLLUP_LATE', expect.objectContaining({ appId: 'late', windowStart: '2026-11-03T14:15:00.000Z', minutesLate: 1 }));
   });
 
   test('at most 8 windows per run; the next run goes on from there', async () => {

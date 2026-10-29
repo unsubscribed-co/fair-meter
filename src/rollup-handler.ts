@@ -1,6 +1,7 @@
 import { CloudWatchLogsClient, GetQueryResultsCommand, StartQueryCommand, type ResultField } from '@aws-sdk/client-cloudwatch-logs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { ACTION_LAG_MS } from './actions';
 import type { FairMeterConfig } from './fair-meter';
 import { keys, pkNotExists, setTableKeys, skOf, tableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
@@ -9,18 +10,16 @@ import { priceCall, pricingTime, versionCovers } from './pricing';
 /*
  * The action rollup: every 15 minutes, one Logs Insights query per fixed 15-minute UTC window that
  * closed at least 15 minutes ago (Lambda lines can arrive 5 to 10 minutes late), and one EVENT per
- * person, SKU and window, exactly once. An action is in committed at most 30 minutes after it
- * happens: the floor's premise.
+ * person, SKU and window, exactly once. An action is in committed at most ACTION_LAG_MS (45 minutes)
+ * after it happens: the floor's premise.
  */
 export const WINDOW_MS = 15 * 60_000;
 /** A window is due once its start is this far behind the clock. */
-export const ROLLUP_LAG_MS = 2 * WINDOW_MS;
+export const DUE_MS = 2 * WINDOW_MS;
 /** Catch-up per run, so a run stays well inside its timeout. */
 export const MAX_WINDOWS = 8;
 /** Logs Insights returns at most 10,000 rows: that many means some were cut. */
 const MAX_ROWS = 10_000;
-/** A due window older than this when a run starts was not settled on time (a run missed, failed or blocked). */
-const LATE_MS = ROLLUP_LAG_MS + 5 * 60_000;
 
 /** The Logs Insights query for one window: the lines `action()` writes, summed per person, SKU and env. */
 export function actionQuery(appId: string, windowStart: number): string {
@@ -50,9 +49,10 @@ export async function rollup(
       return done;
     }
     let start = Date.parse(Item.lastWindowStart) + WINDOW_MS;
-    if (start + LATE_MS < now.getTime()) console.error('ROLLUP_LATE', { appId: cfg.appId, windowStart: new Date(start).toISOString(), minutesLate: Math.floor((now.getTime() - start - ROLLUP_LAG_MS) / 60_000) });
+    // Not settled within the rollup lag (a run missed, failed or blocked): the floor no longer holds.
+    if (start + ACTION_LAG_MS < now.getTime()) console.error('ROLLUP_LATE', { appId: cfg.appId, windowStart: new Date(start).toISOString(), minutesLate: Math.floor((now.getTime() - start - ACTION_LAG_MS) / 60_000) });
     const prices = new Map<string, Record<string, any>[]>();
-    for (; done.windows < MAX_WINDOWS && start + ROLLUP_LAG_MS <= now.getTime(); start += WINDOW_MS) {
+    for (; done.windows < MAX_WINDOWS && start + DUE_MS <= now.getTime(); start += WINDOW_MS) {
       const windowStart = new Date(start).toISOString();
       const rows = await query(cwl, logGroups, cfg.appId, start);
       if (rows.length >= MAX_ROWS) {

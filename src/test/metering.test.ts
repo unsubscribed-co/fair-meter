@@ -215,11 +215,11 @@ describe('actions: the floor and the write check', () => {
   const skus = ['stacksplit-new-expense', 'stacksplit-edit-expense'];
   const env = (t: Template, s: cdk.Stack) => JSON.parse(JSON.stringify(s.resolve(Object.entries(t.findResources('AWS::Lambda::Function')).find(([id]) => id.startsWith('Api'))![1].Properties.Environment.Variables.FAIR_METER)));
 
-  test('actions and the floor go into the config: 20 per minute x 30 minutes x concurrency 10 x 5 micro-USD (the defaults)', () => {
+  test('actions and the floor go into the config: 20 per minute x 45 minutes (the rollup lag) x concurrency 10 x 5 micro-USD (the defaults)', () => {
     const { t, s, metering } = synth({ actions: { skus } });
-    expect(metering.config).toMatchObject({ actions: { skus, perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 30_000 });
-    expect(JSON.stringify(env(t, s))).toContain('\\"actionFloorMicroUsd\\":30000');
-    expect(synth({ actions: { skus: ['stacksplit-edit-expense'], perPersonPerMinute: 7, maxConcurrency: 2 } }).metering.config.actionFloorMicroUsd).toBe(7 * 30 * 2 * 3);
+    expect(metering.config).toMatchObject({ actions: { skus, perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 45_000 });
+    expect(JSON.stringify(env(t, s))).toContain('\\"actionFloorMicroUsd\\":45000');
+    expect(synth({ actions: { skus: ['stacksplit-edit-expense'], perPersonPerMinute: 7, maxConcurrency: 2 } }).metering.config.actionFloorMicroUsd).toBe(7 * 45 * 2 * 3);
   });
 
   test('without actions the config has neither', () => {

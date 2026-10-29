@@ -15,6 +15,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { ACTION_LAG_MS } from './actions';
 import { assertTierThresholds, type TierThresholds } from './budget';
 import { usdToMicroUsd } from './cost';
 import { EXPORT_COLUMNS, streamFilterPattern } from './export';
@@ -759,7 +760,7 @@ export class Metering extends Construct {
       // Prices, the cursor and the usage transaction. StartQuery is granted per log group in grant().
       this.table.grant(rollup, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem');
       rollup.addToRolePolicy(new iam.PolicyStatement({ actions: ['logs:GetQueryResults'], resources: ['*'] }));
-      // On the quarter hours: rate() can start anywhere in a window, so a window could wait 45 minutes, past the floor's 30.
+      // On the quarter hours: rate() can start anywhere in a window, so a window could wait 45 minutes, the whole rollup lag, before its run starts.
       new events.Rule(this, 'RollupSchedule', {
         description: `Charge ${props.appId} action lines per person, SKU and 15-minute window`,
         schedule: events.Schedule.cron({ minute: '0/15' }),
@@ -814,8 +815,9 @@ export class Metering extends Construct {
 }
 
 /**
- * The most one person can spend on actions within one rollup lag (30 minutes): perPersonPerMinute
- * x 30 x maxConcurrency x the highest per-action price (rounded up) of any version of any action SKU.
+ * The most one person can spend on actions within one rollup lag (ACTION_LAG_MS, 45 minutes):
+ * perPersonPerMinute x 45 x maxConcurrency x the highest per-action price (rounded up) of any
+ * version of any action SKU.
  * Rounding each action up also covers the rollup's rounding up per window.
  */
 function floorMicroUsd(a: { skus: string[]; perPersonPerMinute: number; maxConcurrency: number }): number {
@@ -830,5 +832,5 @@ function floorMicroUsd(a: { skus: string[]; perPersonPerMinute: number; maxConcu
     if (f.unit !== 'units') throw new Error(`Metering: ${sku} is priced in ${f.unit}, not per action (units)`);
     return Math.max(...f.versions.map((v) => Math.ceil(Number(v.microUsdPerKUnits) / 1000)));
   }));
-  return a.perPersonPerMinute * 30 * a.maxConcurrency * perAction;
+  return a.perPersonPerMinute * (ACTION_LAG_MS / 60_000) * a.maxConcurrency * perAction;
 }

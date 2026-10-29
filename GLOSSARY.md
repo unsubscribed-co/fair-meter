@@ -44,7 +44,7 @@ The cheap read before a write (`canWrite`) that refuses a person whose room is b
 _Avoid_: balance check, gate
 
 **Floor**:
-The most one person can spend on actions within one rollup lag. It is kept free of AI holds, so actions never overshoot the cap.
+The most one person can spend on actions within one rollup lag (45 minutes: an action is in committed at most that long after it happens). It is kept free of AI holds, so actions never overshoot the cap.
 _Avoid_: buffer, reserve
 
 ## Limits
