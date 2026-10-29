@@ -271,15 +271,21 @@ async function inspectSettled(ddb: DynamoDBDocumentClient, table: string, r: Usa
     console.error('RECORD_CONFLICT', { appId: r.appId, requestId: r.requestId, sub: r.sub, reason, record: r });
     return 'conflict' as const;
   };
-  // Same token, different parameters, within DynamoDB's 10-minute idempotency window.
-  if (e?.name === 'IdempotentParameterMismatchException') return conflict('another payload for this call within the token window');
+  // Same token, other parameters, within DynamoDB's 10-minute idempotency window (e.g. real usage
+  // right after the sweeper's estimate). The token's other use may or may not have committed.
+  const mismatch = e?.name === 'IdempotentParameterMismatchException';
   // Only the EVENT put and the PENDING delete carry conditions.
-  if (!(e?.name === 'TransactionCanceledException' && e.CancellationReasons?.some((c) => c.Code === 'ConditionalCheckFailed'))) throw err;
+  if (!mismatch && !(e?.name === 'TransactionCanceledException' && e.CancellationReasons?.some((c) => c.Code === 'ConditionalCheckFailed'))) throw err;
   const { Item: event } = await ddb.send(new GetCommand({ TableName: table, Key: keys.event(r.sub, r.requestTime, r.appId, r.requestId), ConsistentRead: true }));
-  // The sweeper lost a race to the app's own settle or release: the real outcome stands.
+  // The sweeper lost a race to the app's own settle or release: the real outcome stands (a row
+  // still pending is swept again on the next run).
   if (r.estimated === 'swept') return 'duplicate';
-  // No EVENT and no PENDING: the hold was released. A second release is a repeat; a settle is not.
-  if (!event) return r.release ? 'duplicate' : conflict('the reservation was already released');
+  if (!event) {
+    // Nothing settled under the token yet: queue it; after the window the condition decides.
+    if (mismatch) throw err;
+    // No EVENT and no PENDING: the hold was released. A second release is a repeat; a settle is not.
+    return r.release ? 'duplicate' : conflict('the reservation was already released');
+  }
   if (event.usageHash === r.usageHash) return 'duplicate';
   if (event.estimated === 'swept') return trueUp(ddb, table, r, event);
   return conflict('the call was already settled with another payload');

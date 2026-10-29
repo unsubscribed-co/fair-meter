@@ -291,6 +291,7 @@ describe('record', () => {
 
   test('a conflict is never queued', async () => {
     const call = await reserve();
+    items[`USER#ana@x.co|EVENT#${AT.toISOString()}#stacksplit#${call.callId}`] = { usageHash: 'another' };
     ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('x'), { name: 'IdempotentParameterMismatchException' }));
     expect(await meter().record(call, anthropicUsage)).toBe('conflict');
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);

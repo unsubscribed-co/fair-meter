@@ -107,10 +107,20 @@ describe('recordUsage on the new path', () => {
     expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
-  test('T3 (token window): IdempotentParameterMismatchException is a conflict', async () => {
+  test('T3 (token window): IdempotentParameterMismatchException also reads the EVENT', async () => {
     ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('mismatch'), { name: 'IdempotentParameterMismatchException' }));
+    // Settled with another payload: a conflict.
+    event({ ...eventKey, usageHash: 'h-other' });
     expect(await recordUsage(ddb(), 't', settle)).toBe('conflict');
     expect(console.error).toHaveBeenCalledWith('RECORD_CONFLICT', expect.anything());
+    // No EVENT: the token's other use may not have committed. Thrown, so it is queued and the condition decides later.
+    event(undefined);
+    await expect(recordUsage(ddb(), 't', settle)).rejects.toThrow('mismatch');
+    // The sweeper's estimate within the last 10 minutes: the real usage trues it up.
+    ddbMock.reset();
+    ddbMock.on(TransactWriteCommand).rejectsOnce(Object.assign(new Error('mismatch'), { name: 'IdempotentParameterMismatchException' })).resolves({});
+    event({ ...eventKey, usageHash: 'h-swept', estimated: 'swept', costMicroUsd: 5_798, pricingVersion: settle.pricingVersion });
+    expect(await recordUsage(ddb(), 't', settle)).toBe('trued_up');
   });
 
   test('T9: real usage after the sweeper estimate: one ADJUST late-usage, then duplicate', async () => {
