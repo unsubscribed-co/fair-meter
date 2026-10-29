@@ -139,7 +139,7 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect(await events('t2@x.co')).toHaveLength(1);
   });
 
-  test('T3: a different payload for the same reservation: conflict, ledger unchanged', async () => {
+  test('T3: a different payload for the same hold: conflict, ledger unchanged', async () => {
     const call = (await meter().authorize(ask('t3@x.co'))) as Reservation;
     await meter().record(call, usage);
     expect(await meter().record(call, { ...usage, output_tokens: 999 })).toBe('conflict');
@@ -156,7 +156,7 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect(await pendingOf('t4@x.co')).toHaveLength(9);
   });
 
-  test.each([['undefined', undefined], ['{}', {}]])('T6: no usable usage (%s): the reservation, no_usage, USAGE_MISSING', async (name, given) => {
+  test.each([['undefined', undefined], ['{}', {}]])('T6: no usable usage (%s): the hold, no_usage, USAGE_MISSING', async (name, given) => {
     const person = `t6-${name.length}@x.co`;
     const call = (await meter().authorize(ask(person))) as Reservation;
     expect(await meter().record(call, given)).toBe('recorded');
@@ -167,12 +167,12 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect(console.error).toHaveBeenCalledWith('USAGE_MISSING', expect.anything());
   });
 
-  test("T7: 'unknown': aborted, at the reservation, no error log", async () => {
+  test("T7: 'unknown': aborted, at the hold, no error log", async () => {
     const call = (await meter().authorize(ask('t7@x.co'))) as Reservation;
     expect(await meter().record(call, 'unknown')).toBe('recorded');
     expect(await events('t7@x.co')).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, estimated: 'aborted', absorbedMicroUsd: RESERVED })]);
     expect(console.error).not.toHaveBeenCalled();
-    // Counted toward the cap at the reservation; the operator absorbs it.
+    // Counted toward the cap at the hold; the operator absorbs it.
     expect(await day('t7@x.co')).toMatchObject({ committedMicroUsd: RESERVED, costMicroUsd: RESERVED });
     expect(charged(await day('t7@x.co'))).toBe(0);
     expect(charged(await month('t7@x.co'))).toBe(0);
@@ -222,7 +222,7 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect(await pendingOf('t8@x.co')).toHaveLength(0);
   });
 
-  test('T15: actual above the reservation: the actual cost, committed over by the excess', async () => {
+  test('T15: actual above the hold: the actual cost, committed over by the excess', async () => {
     const call = (await meter().authorize(ask('t15@x.co'))) as Reservation;
     expect(await meter().record(call, { input_tokens: 0, output_tokens: 20_000 })).toBe('recorded');
     expect(await day('t15@x.co')).toMatchObject({ committedMicroUsd: 10_000, costMicroUsd: 10_000 });
@@ -349,7 +349,7 @@ suite('★ FairMeter against DynamoDB Local', () => {
       });
     });
 
-    test('after a hold: held is the reservation, nothing spent yet', async () => {
+    test('after a hold: held is the hold amount, nothing spent yet', async () => {
       await meter().authorize(ask('u-hold@x.co'));
       expect(await meter().usage('u-hold@x.co')).toEqual({
         day: { spentMicroUsd: 0, heldMicroUsd: RESERVED, capMicroUsd: CAP, roomMicroUsd: CAP - RESERVED, resetsAt: resets.day },

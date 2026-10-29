@@ -76,6 +76,9 @@ The provider's or AWS's published price, used even when a free tier or a credit 
 **Component**:
 One part of an action's list price: database, API, compute, logs or other.
 
+**RRU, WRU** (`rru`, `wru`):
+Read and write request units: the DynamoDB capacity a write consumed, measured per action in measure mode and priced as the action's database component.
+
 **Fee**:
 The declared share added on top of list price for the project; it has one home (`prices/fee.json`) and is zero when billing is `none`.
 _Avoid_: markup, margin

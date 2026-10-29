@@ -243,7 +243,7 @@ describe('record', () => {
     expect(console.error).not.toHaveBeenCalled();
   });
 
-  test("T7: 'unknown': settled at the reservation, estimated 'aborted', no alarm", async () => {
+  test("T7: 'unknown': settled at the hold, estimated 'aborted', no alarm", async () => {
     const call = await reserve();
     expect(await meter().record(call, 'unknown')).toBe('recorded');
     expect(settled()).toMatchObject({ costMicroUsd: 5_798, estimated: 'aborted', inputTokens: 30_000, outputTokens: 4_096 });
@@ -274,7 +274,7 @@ describe('record', () => {
     expect(console.error).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.anything());
   });
 
-  test.each([[undefined], [{}], [{ input_tokens: 'many' }], [{ estimate: 'oops' }], [{ estimate: { inputTokens: 7_000 } }], [{ estimate: { inputTokens: 7_000, outputTokens: 0, reasoningTokens: -1 } }]])('T6: no usable usage (%p): the reservation, no_usage-style, USAGE_MISSING', async (usage) => {
+  test.each([[undefined], [{}], [{ input_tokens: 'many' }], [{ estimate: 'oops' }], [{ estimate: { inputTokens: 7_000 } }], [{ estimate: { inputTokens: 7_000, outputTokens: 0, reasoningTokens: -1 } }]])('T6: no usable usage (%p): the hold, no_usage-style, USAGE_MISSING', async (usage) => {
     const call = await reserve();
     expect(await meter().record(call, usage as object | undefined)).toBe('recorded');
     expect(settled()).toMatchObject({ costMicroUsd: 5_798, estimated: (usage as any)?.estimate ? 'aborted' : 'no_usage' });

@@ -14,7 +14,8 @@ npm install github:unsubscribed-co/fair-meter#v0.3.0
 
 - `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/testing` has the test double (`FakeFairMeter`, see "Testing your metering code"); `fair-meter/<file>` reaches one file.
 - Peer dependencies: `aws-cdk-lib`, `constructs`, `@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb` and `@aws-sdk/client-sqs` (`FairMeter`, `Metering`). The rest are optional; install them for the construct that needs them:
-  - `@aws-sdk/client-s3` and `@aws-sdk/util-dynamodb`: `MeteringExport`;
+  - `@aws-sdk/client-s3`: `MeteringExport`;
+  - `@aws-sdk/util-dynamodb`: `MeteringExport` and the migration CLI (`migrate-cli`);
   - `@aws-sdk/client-ssm`: `DeepSeekReconciliation`;
   - `@aws-sdk/client-cloudwatch`: `DeepSeekReconciliation` and `FreeTierWatch`;
   - `@aws-sdk/client-cloudwatch-logs`: `Metering` with `actions` (the rollup) and `prices-cli measure`;
@@ -53,20 +54,20 @@ try {
 
 Each `FairMeter` caches a SKU's price versions for 5 minutes and picks the one valid at the call's time from them, so a warm instance doesn't query prices on every call. A SKU with no version isn't cached: one synced later is found on the next call.
 
-**`record(call, usage)`**, after the attempt, whatever happened. Settles the reservation exactly once:
+**`record(call, usage)`**, after the attempt, whatever happened. Settles the hold exactly once:
 
 | `usage` | When | Settled at | Who pays |
 |---|---|---|---|
 | the provider's usage block | it answered | the actual cost (the price's provider picks the adapter) | the person |
 | `{ estimate: <usage block or meters> }` | the app aborted it but can guess (a hedge loser's input tokens); meters are `{ inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens?, reasoningTokens? }`, the same for every provider | that estimate, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
-| `'unknown'` | aborted or lost with no guess (timeout, network error after sending) | the reservation, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
+| `'unknown'` | aborted or lost with no guess (timeout, network error after sending) | the hold, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
 | `'not_billed'` | an error status the provider doesn't bill (4xx, 5xx, 429) | nothing: the hold is released, no EVENT | nobody |
 | `'not_sent'` | the app reserved but never called the provider | the same release as `'not_billed'` (the same record: one after the other is a `duplicate`) | nobody |
-| `undefined` or malformed | a 200 without usable usage | the reservation, `estimated: 'no_usage'`, USAGE_MISSING alarms | the person (they were served) |
+| `undefined` or malformed | a 200 without usable usage | the hold, `estimated: 'no_usage'`, USAGE_MISSING alarms | the person (they were served) |
 
 An absorbed attempt keeps its list-price cost and counts toward the cap, but the EVENT and the person's day and month rows carry `absorbedMicroUsd`: the person is charged `costMicroUsd − absorbedMicroUsd`. The sweeper's settles are absorbed too. A late true-up of a swept attempt moves it: real usage charges the person its real cost, a late `'not_billed'` leaves them at $0.
 
-Outcomes: `recorded`, `duplicate`, `trued_up` (real usage after the sweeper's estimate, written as an ADJUST), `conflict` (another payload for a settled call: refused, RECORD_CONFLICT alarms), `deferred` (queued), `failed` (queue down too: USAGE_RECORD_FAILED; the sweeper still settles the hold). A cost above the reservation is recorded as it is and logs RESERVATION_EXCEEDED, which alarms: it is the only sign that `max` didn't bound the call and the cap was overshot.
+Outcomes: `recorded`, `duplicate`, `trued_up` (real usage after the sweeper's estimate, written as an ADJUST), `conflict` (another payload for a settled call: refused, RECORD_CONFLICT alarms), `deferred` (queued), `failed` (queue down too: USAGE_RECORD_FAILED; the sweeper still settles the hold). A cost above the hold is recorded as it is and logs RESERVATION_EXCEEDED, which alarms: it is the only sign that `max` didn't bound the call and the cap was overshot.
 
 If the reserve write fails ambiguously (a timeout or 5xx: it may have committed), `authorize` resends the identical write (same idempotency token) to learn the outcome. If it still can't tell, it refuses, releases any hold now, and queues a second release a minute later, so the sweeper never charges for a call that wasn't made.
 
@@ -98,7 +99,7 @@ const metering = new Metering(this, 'Metering', {
 metering.grant(fn); // IAM on the ledger table, the FAIR_METER env, an alarm on fn's metering error lines
 ```
 
-It creates the ledger table, `metering.table` and a stack output: on-demand, `PK`/`SK`, TTL on `expiresAt`, point-in-time recovery, deletion protected and retained when the stack is deleted. Prices, counters, holds and the ledger live there, nothing of your app's; your `authorize` and `record` code needs no table settings. It also creates the retry queue and its Lambda (`MeteringRetry`, DLQ alarms on depth and on a 7-day-old message) and the sweeper: every 10 minutes it settles holds left open for 30 minutes (a crash between authorize and the settle) at their reservation, `estimated: 'swept'`, and alarms. Give `fn` its own `logGroup`. Optional: `alarmAction` (without it the alarms exist with no action, fine for dev), `allAppsDailyCapUsd`, `maxCallsPerMinute`, `tiers`. `billing: 'hosted'` is refused until the wallet exists.
+It creates the ledger table, `metering.table` and a stack output: on-demand, `PK`/`SK`, TTL on `expiresAt`, point-in-time recovery, deletion protected and retained when the stack is deleted. Prices, counters, holds and the ledger live there, nothing of your app's; your `authorize` and `record` code needs no table settings. It also creates the retry queue and its Lambda (`MeteringRetry`, DLQ alarms on depth and on a 7-day-old message) and the sweeper: every 10 minutes it settles holds left open for 30 minutes (a crash between authorize and the settle) at their hold, `estimated: 'swept'`, and alarms. Give `fn` its own `logGroup`. Optional: `alarmAction` (without it the alarms exist with no action, fine for dev), `allAppsDailyCapUsd`, `maxCallsPerMinute`, `tiers`. `billing: 'hosted'` is refused until the wallet exists.
 
 **The retry queue** (`MeteringRetry`, also under `Metering`): a record the app couldn't write waits on the queue and is retried every minute; one that still fails after 10 receives is parked in the DLQ. A message that can never be recorded (not JSON, no `appId`/`sub`/`requestId`/`requestTime`, or no transaction can be built from it) is parked at once, logged `USAGE_RECORD_PARKED` (an error that alarms under `Metering`). Every night at 04:00 UTC a redrive Lambda drains the DLQ: each valid record goes back on the retry queue, at most 3 times per call, counted on `REDRIVE#<app>` / `CALL#<callId>` (kept 30 days); recording is idempotent, so a record already in the ledger ends `duplicate`. Invalid records stay, and so does a call at its third redrive (logged `REDRIVE_LIMIT`), so the DLQ alarms stay on. The manual step when that happens: read the message in the SQS console, fix the cause (bad data, a missing price, a table permission), then redrive it from the console (not counted) or delete it if it must never be recorded; the DLQ drops it 14 days after its first enqueue.
 
@@ -187,7 +188,7 @@ Defaults: `perPersonPerMinute` 20, `maxConcurrency` 10. For example, 20 x 45 x 1
 
 Why it bounds spend (prepaid, never debt): AI holds can't use the floor (`authorize` checks and reserves against `cap - floor`), and an action reaches `committedMicroUsd` at most 45 minutes after it happens (the rollup lag): its window is due 30 minutes after it starts, and the other 15 cover EventBridge's delay, the run's own time and Logs Insights polling. Within those 45 minutes one instance lets a person do at most `perPersonPerMinute` actions a minute, and at most `maxConcurrency` instances run at once, so the actions not yet counted cost at most the floor. Rounding each action's price up also covers the rollup's rounding up per window. So at any moment the person's spend is at most committed (no more than `cap - floor` when the last write was allowed) plus the floor: the cap.
 
-**Reserved concurrency.** `maxConcurrency` must really bound the instances. With `reserveConcurrency: true` (prod), every function given to `grant` must set `reservedConcurrentExecutions`, at most `maxConcurrency` in total, or synth fails. Without it (dev), nothing is checked and the account's concurrency limit is the bound: keep `maxConcurrency` at least that limit (the dev account's limit is 10, the default; AWS refuses any reservation there).
+**Reserved concurrency.** `maxConcurrency` must really bound the instances. With `reserveConcurrency: true` (prod), every function given to `grant` must set `reservedConcurrentExecutions`, at most `maxConcurrency` in total, or synth fails. Without it (dev), nothing is checked and the account's concurrency limit is the bound: keep `maxConcurrency` at least that limit (a new AWS account's default concurrency limit can be as low as 10, this default; such an account can't reserve any concurrency).
 
 **How actions are charged (the rollup).** With `actions`, `Metering` adds a Lambda that runs on every quarter hour (`cron(0/15 * * * ? *)`; a `rate()` could start anywhere in a window and leave it waiting 45 minutes, the whole rollup lag, before its run starts). Each run takes every fixed 15-minute UTC window after its cursor whose start is at least 30 minutes old, oldest first, at most 8 a run (so a missed run catches up), and for each one runs one Logs Insights query over the log groups of the functions given to `grant`: the lines with `fairMeter = "action"` and the app's id, `sum(n)` by person, SKU and env. Each row becomes one EVENT (`kind: 'actions'`, `requestId: actions-<sku>-<windowStart>`, at the window's start, so an action at 23:50 UTC counts on that day) costing `ceil(n x microUsdPerKUnits / 1000)` at the price version valid at the window's start, counted in the AWS provider counter and added to the person's `committedMicroUsd`, where `canWrite` reads it. The EVENT key is deterministic, so a rerun or an overlapping run is a `duplicate`, never a second charge. The cursor (`ROLLUP#<app>` / `CURSOR`) moves past a window only once all its records are written; the first run starts at the current window (no backfill). Lines arrive in Logs up to about 10 minutes late, so a window is queried 15 minutes after it closes: an action is charged 15 to 30 minutes after it happens, plus the run's own time: within the 45-minute rollup lag the floor covers.
 - An SKU with no price version at the window's start logs `ACTION_UNPRICED`, and the cursor waits there; sync the price and the next run charges it. Log retention (a month) is the horizon.
@@ -213,7 +214,7 @@ Options: `dailyCapMicroUsd` (default 500,000, $0.50), `actions` and `actionFloor
 
 ### Known limits (v0.3.0)
 
-- **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the reservation. Conservative: the cap is tighter, never overshot.
+- **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the hold. Conservative: the cap is tighter, never overshot.
 - **Request-priced counters count calls.** `{ requests: 3 }` costs 3 requests, but the counters add `requests` 1 (one call). The money is right.
 - **Late-usage ADJUSTs export only their cost.** Their meters and band stay on the ADJUST item, not in the export columns, and their `createdAt` is the call's time (so retries are identical), not when the correction was written.
 - **IAM is ledger-table-wide.** `grant(fn)` allows Query, Get, BatchGet, Put, Update and Delete on the whole ledger table, including `PRICING#*`; it could be narrowed by leading key. It never reaches the app's own tables.

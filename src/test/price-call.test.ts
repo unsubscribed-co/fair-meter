@@ -53,7 +53,7 @@ describe('reserveCost (T13)', () => {
     expect(reserveCost({ microUsdPerRequest: 32_000 }, { requests: 2 }, OFF)).toBe(64_000);
   });
 
-  test('property: the reservation is >= the cost of any usage within max (bands, tiers, cache writes, reasoning)', () => {
+  test('property: the hold is >= the cost of any usage within max (bands, tiers, cache writes, reasoning)', () => {
     let seed = 42;
     const rand = (n: number) => { seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31; return seed % (n + 1); };
     for (const at of [OFF, PEAK]) {
@@ -106,7 +106,7 @@ describe('repriceEvent goes through priceCall (M8)', () => {
     expect(repriceEvent(event({ sku: 'gemini-search' }), search)).toEqual({ status: 'unrepriceable', sku: 'gemini-search', reason: 'missing meters (units)' });
   });
 
-  test('an estimated event (settled at its reservation, or trued up later) is never re-priced from its meters', () => {
+  test('an estimated event (settled at its hold, or trued up later) is never re-priced from its meters', () => {
     expect(repriceEvent(event({ sku: 'claude-haiku-5-5', estimated: 'swept', inputTokens: 30_000, outputTokens: 4_096, cacheReadTokens: 0 }), { 'claude-haiku-5-5': [haiku] }))
       .toEqual({ status: 'unrepriceable', sku: 'claude-haiku-5-5', reason: 'estimated usage' });
   });

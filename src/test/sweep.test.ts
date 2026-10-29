@@ -23,7 +23,7 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
-test('settles holds older than 30 minutes at their reservation, swept; younger ones wait', async () => {
+test('settles holds older than 30 minutes at their hold, swept; younger ones wait', async () => {
   ddbMock.on(QueryCommand).resolvesOnce({ Items: [row('a')], LastEvaluatedKey: { pk: 'PENDING#stacksplit', sk: 'CALL#a' } }).resolves({ Items: [row('b')] });
   expect(await sweep(ddb(), cfg, minutes(29))).toEqual({ settled: 0 });
   expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
