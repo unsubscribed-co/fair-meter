@@ -13,7 +13,11 @@ npm install github:unsubscribed-co/fair-meter#v0.2.0
 ```
 
 - `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/<file>` reaches one file.
-- Peer dependencies: `aws-cdk-lib`, `constructs`, the AWS SDK v3 clients listed in `package.json`, `@types/aws-lambda`.
+- Peer dependencies: `aws-cdk-lib`, `constructs`, `@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb` and `@aws-sdk/client-sqs` (`FairMeter`, `Metering`). The rest are optional; install them for the construct that needs them:
+  - `@aws-sdk/client-s3` and `@aws-sdk/util-dynamodb`: `MeteringExport`;
+  - `@aws-sdk/client-ssm`: `DeepSeekReconciliation`;
+  - `@aws-sdk/client-cloudwatch`: `DeepSeekReconciliation` and `FreeTierWatch`;
+  - `@types/aws-lambda`: only if your type check reaches `fair-meter/retry-handler` or `fair-meter/export-handler` (the constructs bundle them without it).
 - Jest must transform it: `transformIgnorePatterns: ['/node_modules/(?!fair-meter/)']`.
 
 License: AGPL-3.0.
@@ -23,12 +27,12 @@ License: AGPL-3.0.
 Two calls around every paid provider attempt, one construct, one folder of prices. Every retry, hedge and fallback is its own attempt.
 
 ```ts
-import { FairMeter } from 'fair-meter';
+import { FairMeter, type AttemptUsage } from 'fair-meter';
 const meter = new FairMeter(); // config from the FAIR_METER env, written by the Metering construct
 
 const call = await meter.authorize({ person, sku: 'claude-haiku-5-5', paidBy: 'credit', max: { inputTokens: utf8Bytes, outputTokens: maxTokens } });
 if (!call.ok) return reply(call.status, call.body, call.headers); // ready HTTP answer: 429 or 503
-let spent: object | undefined | 'unknown' | 'not_billed' = 'unknown';
+let spent: AttemptUsage = 'unknown';
 try {
   const res = await callProvider({ max_tokens: maxTokens });
   spent = res.ok ? res.body.usage : 'not_billed';
@@ -41,6 +45,7 @@ try {
 - reads the SKU's price version valid now, the person's day, and the app and all-apps breakers;
 - reserves the most this attempt can cost against the person's daily cap, in one transaction (a `PENDING#<app>` row plus a conditional add on the day's `committedMicroUsd`), so parallel calls can't overshoot the cap;
 - `max` must bound the real usage: the cap is only as good as it. Tokens: `inputTokens` = the UTF-8 bytes of everything sent (text tokens are never fewer than bytes), `outputTokens` = the `max_tokens` sent. **The bytes bound fails for images and files sent by URL or file id** (a 100-byte URL can cost thousands of tokens): add the provider's token count for each such part. `{ chars }`, `{ units }` or `{ requests }` for other prices;
+- **when the bytes bound crosses the SKU's first context tier**, count instead: the hold is priced at every tier `inputTokens` could reach, so 150,000 bytes of a 90,000-token prompt are held at Haiku's above-100k rates, five times the base. When the bytes are above the first tier's `aboveInputTokens`, pass the provider's own token count as `inputTokens` (Anthropic's count-tokens endpoint is free). The bound only has to hold; a counted bound under the threshold reserves at the base rate;
 - a malformed request (from untyped JavaScript) is refused with 500 `metering_unavailable` and alarms; `authorize` never throws;
 - returns `{ ok: true, tier, callId, hold }` (one fresh `callId` per attempt), or `{ ok: false, status, body, headers }`: `daily_limit_reached` (429, `resetsAt`), `too_many_requests` (429, `Retry-After`), `service_paused`, `pricing_not_configured`, `metering_unavailable` (503).
 
@@ -49,9 +54,10 @@ try {
 | `usage` | When | Settled at | Who pays |
 |---|---|---|---|
 | the provider's usage block | it answered | the actual cost (the price's provider picks the adapter) | the person |
-| `{ estimate: <usage block> }` | the app aborted it but can guess (a hedge loser's input tokens) | that estimate, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
+| `{ estimate: <usage block or meters> }` | the app aborted it but can guess (a hedge loser's input tokens); meters are `{ inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens?, reasoningTokens? }`, the same for every provider | that estimate, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
 | `'unknown'` | aborted or lost with no guess (timeout, network error after sending) | the reservation, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
 | `'not_billed'` | an error status the provider doesn't bill (4xx, 5xx, 429) | nothing: the hold is released, no EVENT | nobody |
+| `'not_sent'` | the app reserved but never called the provider | the same release as `'not_billed'` (the same record: one after the other is a `duplicate`) | nobody |
 | `undefined` or malformed | a 200 without usable usage | the reservation, `estimated: 'no_usage'`, USAGE_MISSING alarms | the person (they were served) |
 
 An absorbed attempt keeps its list-price cost and counts toward the cap, but the EVENT and the person's day and month rows carry `absorbedMicroUsd`: the person is charged `costMicroUsd − absorbedMicroUsd`. The sweeper's settles are absorbed too. A late true-up of a swept attempt moves it: real usage charges the person its real cost, a late `'not_billed'` leaves them at $0.
@@ -72,6 +78,8 @@ const { day, month, tier } = await meter.usage(person);
 - `heldMicroUsd` is the open holds of calls in flight: `committedMicroUsd − costMicroUsd`, at least 0 (an ADJUST doesn't move `committedMicroUsd`, so after a correction it is approximate);
 - `roomMicroUsd` is what is left under the daily cap: `capMicroUsd − committedMicroUsd`, at least 0;
 - `resetsAt` (ISO, UTC) is the next UTC midnight for the day and the first of next month for the month; `tier` is the one `authorize` would report.
+
+To show `resetsAt` in the person's own time and language, `resetsAtLocal(resetsAt, { locale, timeZone, now? })` returns `{ time, relative }` from the platform's `Intl` (`{ time: '19:00', relative: 'dentro de 10 horas' }` for `es` in `America/Bogota`); the sentence around them stays in your app's strings.
 
 A person with no rows gets zeros and the whole cap as room. It moves no money, so unlike `authorize` it rejects on a read error. `Metering.grant(fn)` allows the read.
 

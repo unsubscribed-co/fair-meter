@@ -32,6 +32,13 @@
     "aws-cdk-lib": "^2.270.0",
     "constructs": "^10.5.0"
   },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-cloudwatch": { "optional": true },
+    "@aws-sdk/client-s3": { "optional": true },
+    "@aws-sdk/client-ssm": { "optional": true },
+    "@aws-sdk/util-dynamodb": { "optional": true },
+    "@types/aws-lambda": { "optional": true }
+  },
   "devDependencies": {
     "@aws-sdk/client-cloudwatch": "^3.1145.0",
     "@aws-sdk/client-dynamodb": "^3.1142.0",
