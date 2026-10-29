@@ -125,6 +125,20 @@ suite('migrate against DynamoDB Local', () => {
     expect(row(await scan(TO), 'USER#ana', sk)).toEqual({ PK: 'USER#ana', SK: sk, costMicroUsd: 11 });
   });
 
+  test('a PRICING row the newer sync closed with a validTo counts as already copied; another price is refused, never overwritten', async () => {
+    const from = `fair-meter-app-pricing-${run}`;
+    const to = `fair-meter-ledger-pricing-${run}`;
+    await createTable(from, 'pk', 'sk');
+    await createTable(to, 'PK', 'SK');
+    await put(from, { pk: 'PRICING#a', sk: '2026-11-01T00:00:00Z', microUsdPerKUnits: 1_234, provider: 'aws' });
+    await put(from, { pk: 'PRICING#b', sk: '2026-11-01T00:00:00Z', microUsdPerKUnits: 1_000, provider: 'aws' });
+    await put(to, { PK: 'PRICING#a', SK: '2026-11-01T00:00:00Z', microUsdPerKUnits: 1_234, provider: 'aws', validTo: '2026-12-01T00:00:00Z' });
+    await put(to, { PK: 'PRICING#b', SK: '2026-11-01T00:00:00Z', microUsdPerKUnits: 2_000, provider: 'aws', validTo: '2026-12-01T00:00:00Z' });
+    const { refused } = await migrate(raw, { from, fromKeys: { pk: 'pk', sk: 'sk' }, to, app: 'stacksplit', apply: true });
+    expect(refused).toEqual(['PRICING#b 2026-11-01T00:00:00Z: microUsdPerKUnits is {"N":"2000"} in the ledger table, {"N":"1000"} in the source']);
+    expect(row(await scan(to), 'PRICING#b', '2026-11-01T00:00:00Z')).toEqual({ PK: 'PRICING#b', SK: '2026-11-01T00:00:00Z', microUsdPerKUnits: 2_000, provider: 'aws', validTo: '2026-12-01T00:00:00Z' });
+  });
+
   test('a source user prefix other than USER# becomes USER# in the ledger table', async () => {
     const from = `fair-meter-app-prefix-${run}`;
     const to = `fair-meter-ledger-prefix-${run}`;

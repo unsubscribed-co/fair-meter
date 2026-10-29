@@ -90,7 +90,7 @@ export async function migrate(ddb: DynamoDBClient, args: MigrateArgs): Promise<{
       if (!args.apply) continue;
       const { [fromPk]: _pk, [fromSk]: _sk, ...attributes } = item;
       const key: Item = { PK: { S: pk.startsWith(userPrefix) ? `USER#${pk.slice(userPrefix.length)}` : pk }, SK: { S: sk } };
-      const outcome = await copyRow(ddb, args.from, args.to, `${pk}#${sk}`, key, attributes, family.counter);
+      const outcome = await copyRow(ddb, args.from, args.to, `${pk}#${sk}`, key, attributes, family);
       if (outcome === 'copied') copied++;
       else if (outcome === 'already') already++;
       else refused.push(`${pk} ${sk}: ${outcome}`);
@@ -112,10 +112,11 @@ export async function migrate(ddb: DynamoDBClient, args: MigrateArgs): Promise<{
 
 /**
  * Writes one row and its marker in one transaction. 'already' = the marker exists (copied by an
- * earlier run) or the immutable row is in the ledger table with the same values; any other string
- * is why the row was refused (an immutable row with other values is never overwritten).
+ * earlier run) or the immutable row is in the ledger table with the same values (a PRICING row's
+ * validTo aside: a newer sync closes a version); any other string is why the row was refused (an
+ * immutable row with other values is never overwritten).
  */
-async function copyRow(ddb: DynamoDBClient, from: string, to: string, markerSk: string, key: Item, attributes: Item, counter: boolean): Promise<'copied' | 'already' | string> {
+async function copyRow(ddb: DynamoDBClient, from: string, to: string, markerSk: string, key: Item, attributes: Item, { name, counter }: Family): Promise<'copied' | 'already' | string> {
   const marker = { Put: { TableName: to, Item: { PK: { S: `MIGRATION#${from}` }, SK: { S: markerSk }, migratedAt: { S: new Date().toISOString() } }, ConditionExpression: 'attribute_not_exists(PK)' } };
   const names = Object.keys(attributes);
   // shortcut: every number on a counter row is added, so a SET-once number (free tier's share count) would be summed; Metering's apps write none.
@@ -149,7 +150,7 @@ async function copyRow(ddb: DynamoDBClient, from: string, to: string, markerSk: 
   const source: Item = { ...key, ...attributes };
   // Compared unmarshalled (numbers kept as exact strings) so a set's member order doesn't count.
   const same = (n: string) => isDeepStrictEqual(...[stored, source].map((i) => unmarshall(n in i ? { v: i[n] } : {}, { wrapNumbers: true })) as [unknown, unknown]);
-  const differ = [...new Set([...Object.keys(stored), ...Object.keys(source)])].filter((n) => !same(n));
+  const differ = [...new Set([...Object.keys(stored), ...Object.keys(source)])].filter((n) => !(name === 'PRICING' && n === 'validTo') && !same(n));
   if (!differ.length) return 'already';
   return differ.map((n) => `${n} is ${JSON.stringify(stored[n] ?? null)} in the ledger table, ${JSON.stringify(source[n] ?? null)} in the source`).join('; ');
 }
