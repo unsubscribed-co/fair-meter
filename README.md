@@ -1,23 +1,23 @@
 # fair-meter
 
-Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): every paid call is priced at the provider's list price and written to an append-only ledger in the app's own DynamoDB table, with caps and a per-minute brake before the call. Self-hosted copies run it with `billing: 'none'`: the ledger and caps stay on, nobody is charged.
+Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): every paid thing a person does, an AI call or an action like a new expense, is priced at the published list price and written to an append-only ledger in a DynamoDB table that metering owns, with caps that stop spend before it happens. Self-hosted copies run it with `billing: 'none'`: the ledger and caps stay on, nobody is charged, no fee.
 
-**v0.2.0 adds the money path** for apps: `FairMeter` (below). The older surface (`Meter`, the record builders, households and plans) is Nieto's, unchanged, until Nieto moves to `FairMeter` in v0.3.0; its README follows "Start here".
+**v0.3.0** gives metering its own ledger table (a one-time migration copies v0.2.0's rows), adds `usage(person)` so a person sees their spend, charges actions (`canWrite` before a write, `action` after it, a rollup every 15 minutes) at per-app price lists built from AWS's public Price List (the fee has one file and is never applied under `billing: 'none'`), absorbs attempts that didn't serve the person, and ships a test double. `authorize` and `record` keep their signatures and outcomes: see "Upgrading from v0.2.0". The older surface (`Meter`, the record builders, households and plans) is Nieto's, unchanged, until Nieto moves to `FairMeter`; its README follows "Start here".
 
 ## Install
 
 TypeScript source, no build step: your bundler (esbuild via CDK's `NodejsFunction`) compiles it with your code.
 
 ```
-npm install github:unsubscribed-co/fair-meter#v0.2.0
+npm install github:unsubscribed-co/fair-meter#v0.3.0
 ```
 
-- `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/<file>` reaches one file.
+- `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/testing` has the test double (`FakeFairMeter`, see "Testing your metering code"); `fair-meter/<file>` reaches one file.
 - Peer dependencies: `aws-cdk-lib`, `constructs`, `@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb` and `@aws-sdk/client-sqs` (`FairMeter`, `Metering`). The rest are optional; install them for the construct that needs them:
   - `@aws-sdk/client-s3` and `@aws-sdk/util-dynamodb`: `MeteringExport`;
   - `@aws-sdk/client-ssm`: `DeepSeekReconciliation`;
   - `@aws-sdk/client-cloudwatch`: `DeepSeekReconciliation` and `FreeTierWatch`;
-  - `@aws-sdk/client-cloudwatch-logs`: `Metering` with `actions` (the rollup);
+  - `@aws-sdk/client-cloudwatch-logs`: `Metering` with `actions` (the rollup) and `prices-cli measure`;
   - `@types/aws-lambda`: only if your type check reaches `fair-meter/retry-handler` or `fair-meter/export-handler` (the constructs bundle them without it).
 - Jest must transform it: `transformIgnorePatterns: ['/node_modules/(?!fair-meter/)']`.
 
@@ -194,7 +194,24 @@ Why it bounds spend (prepaid, never debt): AI holds can't use the floor (`author
 - 10,000 rows or more in one window (people x SKUs) fail it with `ROLLUP_TRUNCATED`; any failure logs `ROLLUP_FAILED` and the run fails. A run that starts with a window more than 35 minutes old logs `ROLLUP_LATE`. These terms join the metering error alarm, fed by the rollup's own log group too, and `RollupFailureAlarm` fires on a run that crashes or times out.
 - Cost: Logs Insights charges per GB scanned ($0.005 at list), and it scans every line of the granted functions' log groups in the window, not only the action lines. Windows don't overlap, so each byte is scanned once: about 1% on top of the $0.50 per GB those logs cost to ingest. One query per window, 96 a day.
 
-### Known limits (v0.2.0)
+### Testing your metering code
+
+`fair-meter/testing` exports `FakeFairMeter`: the same public methods as `FairMeter` (the `FairMeterApi` type), in memory, so an app's tests need no DynamoDB and no SDK mocks. Inject either:
+
+```ts
+import type { FairMeterApi } from 'fair-meter';
+import { FakeFairMeter } from 'fair-meter/testing';
+
+const meter = new FakeFairMeter({ dailyCapMicroUsd: 10_000, actions: { skus: ['myapp-add'], perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 3_000 });
+const handler = makeHandler(meter); // the app takes a FairMeterApi
+meter.refuseNext('service_paused'); // the next authorize or canWrite gets this refusal
+meter.rollUp(person, 7_001); // what the rollup charges: the person is now read-only
+expect(meter.calls).toContainEqual({ method: 'action', args: [{ person, sku: 'myapp-add' }] });
+```
+
+Options: `dailyCapMicroUsd` (default 500,000, $0.50), `actions` and `actionFloorMicroUsd` (as `Metering` writes them), `tiers`, `prices` (default: the price files in this package's `prices/`) and `now`. It holds and settles like `FairMeter`, with the same outcomes, refusal bodies and `usage`: a shared test runs the same scenarios against both, `FairMeter` on DynamoDB Local. Where they differ: the fake answers a repeat of a settle with `duplicate` and another payload with `conflict` at once, while `FairMeter` answers those within DynamoDB's 10-minute idempotency window with `recorded` or `deferred`; it has no sweeper, retry queue, app or all-apps breaker or `maxCallsPerMinute` brake (use `refuseNext` for those refusals); and it logs only `ACTION_UNKNOWN`, `RECORD_CONFLICT` and the settle's alarms (`USAGE_MISSING`, `RESERVATION_EXCEEDED`), so `action` writes no line.
+
+### Known limits (v0.3.0)
 
 - **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the reservation. Conservative: the cap is tighter, never overshot.
 - **Request-priced counters count calls.** `{ requests: 3 }` costs 3 requests, but the counters add `requests` 1 (one call). The money is right.
@@ -206,12 +223,24 @@ Why it bounds spend (prepaid, never debt): AI holds can't use the floor (`author
 - **The action count lives in each instance's memory.** A new instance (a cold start, a crash, a deploy) starts at zero for the current minute, so a replaced instance can let a person do up to `perPersonPerMinute` more that minute. The floor assumes the rollup counts every action within 30 minutes; an outage of the rollup alarms.
 - **The floor holds only while the rollup runs.** While it is down or blocked on an unpriced SKU, actions go uncounted and a person can spend past the cap until it catches up (`ROLLUP_LATE`, `ACTION_UNPRICED` and `RollupFailureAlarm` alarm). Hosted billing will also need the cursor's freshness in `canWrite`.
 - **Dropped log lines are absorbed.** A line Logs never receives, or one that arrives after its window was settled, is never charged: the operator pays for it.
+- **`canWrite` doesn't read the app day cap.** One read per write is its budget, and actions cost cents per thousand; rolled-up actions do count in the app day, which pauses AI calls (`service_paused`), not writes.
+- **Shared counters stay in the money transaction.** The app, all-apps and provider day rows are updated in every settle, so bursts can conflict; conflicts are retried twice, then queued, never lost. Move them out when `USAGE_RECORD_DEFERRED` lines with `TransactionConflict` show up.
+- **The ledger table only grows.** Counters and EVENTs are kept forever; cold storage and TTL on old counters come in a later release.
+- **The migration covers `Metering`'s rows only.** Nieto's old-path rows (households, plans, legacy keys) are not copied: Nieto doesn't use `Metering` yet.
 
 What lands in the ledger table: `USER#<person>` / `EVENT#<at>#<app>#<callId>` per settled attempt (with `env`, `paidBy`, `reservedMicroUsd`, `estimated` when it is), the usual day, month, app, all-apps and provider counters, and `PENDING#<app>` / `CALL#<callId>` while an attempt is open. All money is integer micro-USD, rounded up.
 
 ## Upgrading from v0.2.0
 
-v0.3.0 owns its ledger table: drop `table` and `tableKeys` from `Metering` (passing `table` fails at synth). `authorize` and `record` don't change. Deploy, then sync prices to the ledger table (`prices-cli sync --table <ledger table>`).
+The setup changes; `authorize` and `record` don't (same signatures, same outcomes).
+
+- **`Metering` owns its ledger table.** Drop `table` and `tableKeys` from its props (passing `table` fails at synth, pointing here) and any `setTableKeys` call of your own for metering: the ledger table uses the default `PK`/`SK`. `grant(fn)` now covers only the ledger table; the table's name is `metering.table` and a stack output.
+- **Each granted function gets its own `logGroup`**, as before; with actions the rollup queries those log groups.
+- **Actions are optional.** To charge them: add `actions` to `Metering`, install `@aws-sdk/client-cloudwatch-logs`, call `canWrite` before each write and `action` after it (a bulk import goes through `authorize` and `record` with `{ units: n }`, see Actions). In prod pass `reserveConcurrency: true` and set `reservedConcurrentExecutions` on every granted function, at most `maxConcurrency` in total; in dev the account's concurrency limit is the bound.
+- **Fewer required peers.** `@aws-sdk/client-s3`, `@aws-sdk/util-dynamodb`, `@aws-sdk/client-ssm`, `@aws-sdk/client-cloudwatch` and `@types/aws-lambda` are optional now: keep only the ones your constructs need (see Install).
+- **`alarmAction` is optional** on `Metering` and `MeteringRetry`.
+
+Then deploy, and sync prices to the ledger table: `prices-cli sync --table <ledger table>` (no `--keys`).
 
 An app that ran v0.2.0 has its ledger rows in its own table. Copy them into the ledger table, in this order:
 
@@ -228,7 +257,18 @@ An app that ran v0.2.0 has its ledger rows in its own table. Copy them into the 
 
 It copies that app's user DAILY, USAGE, EVENT and ADJUST rows, `APP#<app>`, `GLOBAL`, `PENDING#<app>`, `PRICING#*` and `PROVIDER#*`, under `PK`/`SK` and the `USER#` prefix, with every other attribute as is. It skips `RATE#` rows and everything else in the app table, and only reads the app table. Counter rows (DAILY, USAGE, APP, GLOBAL, PROVIDER DAILY/MONTH) are added to the ones the live app already started. Immutable rows (EVENT, ADJUST, PENDING, PRICING, BALANCE) are put only if absent; one already there with other values is refused and listed, never overwritten, and the exit code is 1. Each row is written with a `MIGRATION#<app table>` marker in the same transaction, so re-running it (after an error or a refusal) copies nothing twice. A settle deferred across the switch may log one `RECORD_CONFLICT` (its full record is in the log); the sweeper then settles the copied PENDING row. The operator runs it on prod.
 
-## The old surface (Nieto's, until v0.3.0)
+## Checks to run in a dev deploy
+
+Logs Insights has no local emulator, so the rollup and `prices-cli measure` are tested on mocked query results and fixtures only. Before relying on actions in prod, check in a dev deploy:
+
+- **The rollup's query filters `@timestamp` in epoch milliseconds.** Do a few actions, then run the rollup's query for that window (`actionQuery(appId, windowStart)`) in the Logs Insights console over the granted log groups: it must return their rows.
+- **The action line reaches Insights intact** in the function's log format (text or JSON): `fairMeter`, `appId`, `person`, `sku` and `n` come out as fields, and `n` sums as a number.
+- **One real action is charged exactly once.** One write, then 30 to 45 minutes later the person has one EVENT `actions-<sku>-<windowStart>` with `actions: 1` at the SKU's price, `usage(person)` shows it, and the next runs leave it as it is.
+- **`measure` reads the dev logs** (with the client wrapped in `measureCapacity`): every action SKU gets `rru`, `wru`, billed ms and memory from Lambda's report, and `list` finds every rate in the live Price List.
+- **The account allows the reservation** with `reserveConcurrency: true`: the Lambda concurrency quota leaves room for `maxConcurrency`.
+- **The migration** on dev: the dry run's counts, then `--apply`, then a second `--apply` that copies nothing.
+
+## The old surface (Nieto's, until Nieto moves to `FairMeter`)
 
 Nieto's metering module (`unsubscribed-co/nieto`, `backend/lambda/metering/` at commit `b3790cf`), moved unchanged in v0.1.0; paths like `lambda/proxy/handler.ts` are Nieto's. Start with `new Meter(config, clients)`; `authorize(sub, at)` before the paid call; build a record with `tokenRecord()`, `charRecord()`, `requestRecord()` or `unitRecord()` and write it with `record()`. The rest is exported for admin tools and may change.
 
