@@ -13,6 +13,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # DynamoDB Local for the integration tests (src/test/integration.test.ts): real conditions and transactions.
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:3.3.1
+        ports:
+          - 8000:8000
+    env:
+      DYNAMODB_ENDPOINT: http://localhost:8000
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

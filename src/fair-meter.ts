@@ -249,7 +249,11 @@ export class FairMeter {
           return refuse(500, 'metering_unavailable');
         }
         if (reasons[1]?.Code === 'ConditionalCheckFailed') return this.limitReached(log, at, tier);
-        if (attempt === 0 && reasons.some((r) => r.Code === 'TransactionConflict')) continue;
+        // Parallel holds on the same day counter conflict; the condition then decides, so retry.
+        if (attempt < 2 && reasons.some((r) => r.Code === 'TransactionConflict')) {
+          await jitter();
+          continue;
+        }
         // It may have committed before failing: give the hold back so the cap isn't held for nothing.
         const released = await recordUsage(this.ddb, table, this.settlement({ ok: true, tier, callId, hold }, 'not_billed')).catch((e) => e);
         console.error('METER_UNAVAILABLE', { ...log, callId, err, released });
@@ -287,7 +291,7 @@ export class FairMeter {
         const conflicted = (err as { CancellationReasons?: { Code?: string }[] }).CancellationReasons?.some((c) => c.Code === 'TransactionConflict');
         if (conflicted && attempt < 2) {
           // Hot counters (app and all-apps days) conflict under bursts; jitter, then the same token again.
-          await new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 150));
+          await jitter();
           continue;
         }
         try {
@@ -333,6 +337,8 @@ export class FairMeter {
     return (await this.ddb.send(new GetCommand({ TableName: this.cfg.tableName, Key: key, ConsistentRead: true }))).Item;
   }
 }
+
+const jitter = () => new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 150));
 
 function refuse(status: Refusal['status'], error: RefusalCode, extra: { resetsAt?: string } = {}, tier?: BudgetTier): Refusal {
   return { ok: false, status, body: { error, ...extra }, headers: {}, ...(tier ? { tier } : {}) };

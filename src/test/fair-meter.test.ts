@@ -156,7 +156,7 @@ describe('authorize', () => {
     expect(console.error).toHaveBeenCalledWith('CALL_ID_REUSED', expect.anything());
   });
 
-  test('a TransactionConflict is retried once with the same token', async () => {
+  test('a TransactionConflict is retried (twice at most) with the same token', async () => {
     ddbMock.on(TransactWriteCommand).rejectsOnce(cancelled('None', 'TransactionConflict')).resolves({});
     expect(await meter().authorize(ask)).toMatchObject({ ok: true });
     const [first, second] = sentTransactions();
