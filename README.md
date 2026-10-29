@@ -153,6 +153,21 @@ What lands in the ledger table: `USER#<person>` / `EVENT#<at>#<app>#<callId>` pe
 
 v0.3.0 owns its ledger table: drop `table` and `tableKeys` from `Metering` (passing `table` fails at synth). `authorize` and `record` don't change. Deploy, then sync prices to the ledger table (`prices-cli sync --table <ledger table>`).
 
+An app that ran v0.2.0 has its ledger rows in its own table. Copy them into the ledger table, in this order:
+
+1. Deploy v0.3.0. The app now writes the ledger table.
+2. Wait 30 minutes, so in-flight Lambdas and the retry window finish against the old table.
+3. Sync prices to the ledger table (above).
+4. Dry run, which writes nothing and prints how many rows of each family it would copy:
+
+   ```
+   npx tsx node_modules/fair-meter/src/migrate-cli.ts --from <app table> [--from-keys pk,sk] [--from-user-prefix USER#] --to <ledger table> --app <appId>
+   ```
+
+5. The same command with `--apply`.
+
+It copies that app's user DAILY, USAGE, EVENT and ADJUST rows, `APP#<app>`, `GLOBAL`, `PENDING#<app>`, `PRICING#*` and `PROVIDER#*`, under `PK`/`SK` and the `USER#` prefix, with every other attribute as is. It skips `RATE#` rows and everything else in the app table, and only reads the app table. Counter rows (DAILY, USAGE, APP, GLOBAL, PROVIDER DAILY/MONTH) are added to the ones the live app already started. Immutable rows (EVENT, ADJUST, PENDING, PRICING, BALANCE) are put only if absent; one already there with other values is refused and listed, never overwritten, and the exit code is 1. Each row is written with a `MIGRATION#<app table>` marker in the same transaction, so re-running it (after an error or a refusal) copies nothing twice. A settle deferred across the switch may log one `RECORD_CONFLICT` (its full record is in the log); the sweeper then settles the copied PENDING row. The operator runs it on prod.
+
 ## The old surface (Nieto's, until v0.3.0)
 
 Nieto's metering module (`unsubscribed-co/nieto`, `backend/lambda/metering/` at commit `b3790cf`), moved unchanged in v0.1.0; paths like `lambda/proxy/handler.ts` are Nieto's. Start with `new Meter(config, clients)`; `authorize(sub, at)` before the paid call; build a record with `tokenRecord()`, `charRecord()`, `requestRecord()` or `unitRecord()` and write it with `record()`. The rest is exported for admin tools and may change.
