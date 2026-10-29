@@ -163,7 +163,7 @@ await saveExpense(...);
 meter.action({ person, sku: 'stacksplit-new-expense' }); // after the write succeeded; { n } for several
 ```
 
-**`action({ person, sku, n = 1 })`** is synchronous, never throws and does no I/O but one JSON line written straight to stdout as its own log event: `{"fairMeter":"action","appId","env","person","sku","n"}` (plus `rru` and `wru` in dev with `measureCapacity`, see "Measuring an app"). It also counts `n` for the person in this instance's current UTC minute. An SKU not in `actions.skus`, or `n` not an integer from 1 to 1000, logs `ACTION_UNKNOWN` (alarms) and writes no line.
+**`action({ person, sku, n = 1 })`** is synchronous, never throws and does no I/O but one JSON line written straight to stdout as its own log event: `{"fairMeter":"action","appId","env","person","sku","n"}` (plus `rru` and `wru` in dev with `measureCapacity`, see "Measuring an app"). It also counts `n` for the person in this instance's current UTC minute. An SKU not in `actions.skus`, or `n` not an integer from 1 to `perPersonPerMinute` (as `canWrite`), logs `ACTION_UNKNOWN` (alarms) and writes no line; a bulk write goes through `authorize` and `record` with `{ units: n }`.
 
 **`canWrite(person, n = 1)`** returns `{ ok: true }` or a refusal like `authorize`'s, and never throws:
 - the person's actions this UTC minute on this instance plus `n` above `perPersonPerMinute`: `too_many_requests` (429, `Retry-After` to the next minute), logged `RATE_LIMITED` (warn), no read;

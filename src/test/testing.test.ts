@@ -146,6 +146,9 @@ describe.each([
     // An unknown SKU is an app bug: alarmed, not counted.
     m.action({ person: p, sku: 'not-configured' });
     expect(console.error).toHaveBeenCalledWith('ACTION_UNKNOWN', expect.objectContaining({ sku: 'not-configured' }));
+    // Nor is an n above perPersonPerMinute: it would bypass the floor.
+    m.action({ person: p, sku: SKU, n: ACTIONS.perPersonPerMinute + 1 });
+    expect(console.error).toHaveBeenCalledWith('ACTION_UNKNOWN', expect.objectContaining({ n: ACTIONS.perPersonPerMinute + 1 }));
     expect(await m.canWrite(p)).toEqual({ ok: true });
   });
 

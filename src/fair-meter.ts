@@ -444,12 +444,13 @@ export class FairMeter {
    * After a successful write: one JSON line to stdout (its own log event), which the rollup turns
    * into an EVENT; no DynamoDB write. In measure mode (`measureCapacity`) the line also carries
    * the units tallied since the last one, as `rru` and `wru`. Synchronous, never throws. An SKU not configured or an `n`
-   * outside 1..1000 is an app bug: ACTION_UNKNOWN (alarms), no line.
+   * outside 1..perPersonPerMinute is an app bug: ACTION_UNKNOWN (alarms), no line (bulk writes
+   * go through authorize and record with `{ units: n }`).
    */
   action(req: { person: string; sku: string; n?: number }): void {
     try {
       const { person, sku, n = 1 } = req;
-      if (typeof person !== 'string' || !person || !this.cfg.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > 1000) {
+      if (typeof person !== 'string' || !person || !this.cfg.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > this.cfg.actions.perPersonPerMinute) {
         console.error('ACTION_UNKNOWN', { appId: this.cfg.appId, person, sku, n });
         return;
       }

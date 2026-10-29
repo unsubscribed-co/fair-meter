@@ -141,7 +141,7 @@ export class FakeFairMeter implements FairMeterApi {
   action(req: { person: string; sku: string; n?: number }): void {
     this.calls.push({ method: 'action', args: [req] });
     const { person, sku, n = 1 } = req ?? {};
-    if (typeof person !== 'string' || !person || !this.options.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > 1000) {
+    if (typeof person !== 'string' || !person || !this.options.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > this.options.actions.perPersonPerMinute) {
       console.error('ACTION_UNKNOWN', { person, sku, n });
       return;
     }

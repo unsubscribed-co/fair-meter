@@ -404,10 +404,10 @@ describe('actions', () => {
     test('one JSON line straight to stdout, its own log event, and nothing else', () => {
       const m = actionMeter();
       expect(m.action({ person: 'ana@x.co', sku: 'stacksplit-new-expense' })).toBeUndefined();
-      m.action({ person: 'ana@x.co', sku: 'stacksplit-edit-expense', n: 40 });
+      m.action({ person: 'ana@x.co', sku: 'stacksplit-edit-expense', n: 3 });
       expect(lines).toEqual([
         '{"fairMeter":"action","appId":"stacksplit","env":"prod","person":"ana@x.co","sku":"stacksplit-new-expense","n":1}\n',
-        '{"fairMeter":"action","appId":"stacksplit","env":"prod","person":"ana@x.co","sku":"stacksplit-edit-expense","n":40}\n',
+        '{"fairMeter":"action","appId":"stacksplit","env":"prod","person":"ana@x.co","sku":"stacksplit-edit-expense","n":3}\n',
       ]);
       expect(ddbMock.calls()).toHaveLength(0);
       expect(console.error).not.toHaveBeenCalled();
@@ -416,7 +416,7 @@ describe('actions', () => {
     test.each([
       ['an SKU not configured', { sku: 'stacksplit-delete-group' }],
       ['n = 0', { n: 0 }],
-      ['n = 1001', { n: 1001 }],
+      ['n above perPersonPerMinute (bulk writes go through authorize)', { n: 4 }],
       ['a fractional n', { n: 1.5 }],
       ['n as a string', { n: '2' }],
       ['no person', { person: '' }],
