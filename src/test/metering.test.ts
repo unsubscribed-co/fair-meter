@@ -67,8 +67,8 @@ test("grant(fn), the retry Lambda and the sweeper reach the ledger table only, n
   const { t } = synth();
   const statements = Object.values(t.findResources('AWS::IAM::Policy')).flatMap((p) => p.Properties.PolicyDocument.Statement);
   const dynamo = statements.filter((st) => [st.Action].flat().some((a: string) => a.startsWith('dynamodb:')));
-  // The app function, the retry Lambda (two grants) and the sweeper.
-  expect(dynamo).toHaveLength(4);
+  // The app function, the retry Lambda (two grants), the redrive and the sweeper.
+  expect(dynamo).toHaveLength(5);
   for (const st of dynamo) expect(JSON.stringify(st.Resource)).toMatch(/^\[\{"Fn::GetAtt":\["MeteringLedger\w+","Arn"\]\}/);
   expect(JSON.stringify(statements)).not.toContain('AppTable');
 });
@@ -89,12 +89,13 @@ test('without an alarmAction every alarm still exists, with no action', () => {
   for (const a of alarms) expect(a.Properties.AlarmActions).toBeUndefined();
 });
 
-test('the metering-error alarm watches the app function logs and the retry Lambda logs (M2)', () => {
+test('the metering-error alarm watches the app function logs, the retry Lambda logs and the redrive logs (M2)', () => {
   const { t } = synth();
-  const pattern = Match.stringLikeRegexp('METER_UNAVAILABLE.*PRICE_MISSING.*SERVICE_PAUSED.*CALL_EXCEEDS_CAP.*CALL_ID_REUSED.*USAGE_MISSING.*RECORD_CONFLICT.*USAGE_RECORD_FAILED.*RESERVATION_EXCEEDED');
+  const pattern = Match.stringLikeRegexp('METER_UNAVAILABLE.*PRICE_MISSING.*SERVICE_PAUSED.*CALL_EXCEEDS_CAP.*CALL_ID_REUSED.*USAGE_MISSING.*RECORD_CONFLICT.*USAGE_RECORD_FAILED.*RESERVATION_EXCEEDED.*USAGE_RECORD_PARKED');
   t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: pattern, LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') }, MetricTransformations: [Match.objectLike({ MetricName: 'stacksplit-prod-MeteringErrors' })] });
   // Conflicts found when a queued record is retried are logged there.
   t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: pattern, LogGroupName: { Ref: Match.stringLikeRegexp('^MeteringRetryLogs') }, MetricTransformations: [Match.objectLike({ MetricName: 'stacksplit-prod-MeteringErrors' })] });
+  t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: pattern, LogGroupName: { Ref: Match.stringLikeRegexp('^MeteringRetryRedriveLogs') }, MetricTransformations: [Match.objectLike({ MetricName: 'stacksplit-prod-MeteringErrors' })] });
   t.hasResourceProperties('AWS::CloudWatch::Alarm', { MetricName: 'stacksplit-prod-MeteringErrors', Threshold: 1, Period: 300, AlarmActions: ['arn:aws:sns:us-east-2:111111111111:a'] });
 });
 
@@ -135,6 +136,40 @@ test("MeteringRetry with an alarmAction: v0.2.0's template (Nieto's construct)",
   // The code asset's hash changes with any source edit; the template's shape is what's pinned.
   const json = JSON.stringify(Template.fromStack(s).toJSON()).replace(/"[0-9a-f]{64}\.zip"/g, '"<asset>.zip"');
   expect(JSON.parse(json)).toMatchSnapshot();
+});
+
+describe('MeteringRetry: park at once and the nightly redrive', () => {
+  const retry = () => {
+    const app = new cdk.App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    const s = new cdk.Stack(app, 'S');
+    const table = new dynamodb.Table(s, 'T', { partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING } });
+    new MeteringRetry(s, 'Retry', { table, alarmAction });
+    const t = Template.fromStack(s);
+    const policy = (prefix: string) => Object.entries(t.findResources('AWS::IAM::Policy')).find(([id]) => id.startsWith(prefix))![1].Properties.PolicyDocument.Statement;
+    const fn = (prefix: string) => Object.entries(t.findResources('AWS::Lambda::Function')).find(([id]) => id.startsWith(prefix))![1].Properties;
+    return { t, policy, fn };
+  };
+  const on = (statements: any[], action: string) => statements.filter((st) => [st.Action].flat().includes(action)).map((st) => JSON.stringify(st.Resource));
+
+  test('the retry Lambda knows the DLQ and may send to it', () => {
+    const { policy, fn } = retry();
+    expect(fn('RetryFn').Environment.Variables.DLQ_URL).toEqual({ Ref: expect.stringMatching(/^RetryDlq/) });
+    expect(on(policy('RetryFnServiceRoleDefaultPolicy'), 'sqs:SendMessage')).toEqual([expect.stringMatching(/"RetryDlq\w+","Arn"/)]);
+  });
+
+  test('the redrive runs at 04:00 UTC, receives and deletes on the DLQ, sends to the source queue and updates the table only', () => {
+    const { t, policy, fn } = retry();
+    const redrive = fn('RetryRedrive');
+    expect(Object.keys(redrive.Environment.Variables)).toEqual(expect.arrayContaining(['TABLE_NAME', 'QUEUE_URL', 'DLQ_URL']));
+    t.hasResourceProperties('AWS::Events::Rule', { ScheduleExpression: 'cron(0 4 * * ? *)', Targets: [Match.objectLike({ Arn: { 'Fn::GetAtt': [Match.stringLikeRegexp('^RetryRedrive'), 'Arn'] } })] });
+    const st = policy('RetryRedriveServiceRoleDefaultPolicy');
+    expect(on(st, 'sqs:ReceiveMessage')).toEqual([expect.stringMatching(/"RetryDlq\w+","Arn"/)]);
+    expect(on(st, 'sqs:DeleteMessage')).toEqual([expect.stringMatching(/"RetryDlq\w+","Arn"/)]);
+    expect(on(st, 'sqs:SendMessage')).toEqual([expect.stringMatching(/"RetryQueue\w+","Arn"/)]);
+    expect(on(st, 'dynamodb:UpdateItem')).toEqual([expect.stringMatching(/"T\w+","Arn"/)]);
+    const dynamo = st.flatMap((s: any) => [s.Action].flat()).filter((a: string) => a.startsWith('dynamodb:'));
+    expect(dynamo).toEqual(['dynamodb:UpdateItem']);
+  });
 });
 
 test('MeteringRetry without an alarmAction: both DLQ alarms, no action', () => {

@@ -42,7 +42,8 @@ export interface MeteringRetryProps extends TableKeysProps {
 
 /**
  * Durable retry path for usage records: an SQS queue the apps' proxies send unrecorded usage to,
- * a small Lambda that records it (idempotently), and a dead-letter queue that alarms.
+ * a small Lambda that records it (idempotently), a dead-letter queue that alarms, and a nightly
+ * redrive that puts the DLQ's valid records back, at most 3 times per call (redrive-handler.ts).
  *
  * Why a queue and not just retrying inline: the SDK already retries inside the request; when
  * DynamoDB is still failing after that, waiting longer would hold the user's answer hostage and
@@ -53,6 +54,7 @@ export class MeteringRetry extends Construct {
   readonly queue: sqs.Queue;
   readonly deadLetterQueue: sqs.Queue;
   readonly fn: lambdaNode.NodejsFunction;
+  readonly redrive: lambdaNode.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: MeteringRetryProps) {
     super(scope, id);
@@ -78,7 +80,7 @@ export class MeteringRetry extends Construct {
       architecture: lambda.Architecture.ARM_64,
       memorySize: 256,
       timeout: cdk.Duration.seconds(10),
-      environment: { TABLE_NAME: props.table.tableName, ...tableKeysEnv(props.tableKeys), NODE_OPTIONS: '--enable-source-maps' },
+      environment: { TABLE_NAME: props.table.tableName, DLQ_URL: this.deadLetterQueue.queueUrl, ...tableKeysEnv(props.tableKeys), NODE_OPTIONS: '--enable-source-maps' },
       logGroup: new logs.LogGroup(this, 'Logs', {
         retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -89,6 +91,36 @@ export class MeteringRetry extends Construct {
     // The usage transaction: one conditional Put plus Updates.
     props.table.grant(this.fn, 'dynamodb:PutItem', 'dynamodb:UpdateItem');
     this.fn.addEventSource(new SqsEventSource(this.queue, { batchSize: 10, reportBatchItemFailures: true }));
+    // A message that can never be recorded is parked at once.
+    this.deadLetterQueue.grantSendMessages(this.fn);
+
+    this.redrive = new lambdaNode.NodejsFunction(this, 'Redrive', {
+      entry: path.join(__dirname, 'redrive-handler.ts'),
+      runtime: lambda.Runtime.NODEJS_24_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      // Below the redrive's receive visibility (6 minutes), so no message is seen twice in one run.
+      timeout: cdk.Duration.minutes(5),
+      environment: {
+        TABLE_NAME: props.table.tableName, QUEUE_URL: this.queue.queueUrl, DLQ_URL: this.deadLetterQueue.queueUrl,
+        ...tableKeysEnv(props.tableKeys), NODE_OPTIONS: '--enable-source-maps',
+      },
+      logGroup: new logs.LogGroup(this, 'RedriveLogs', {
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+      loggingFormat: lambda.LoggingFormat.JSON,
+      bundling: BUNDLING,
+    });
+    // The redrive count (REDRIVE#<app> / CALL#<callId>).
+    props.table.grant(this.redrive, 'dynamodb:UpdateItem');
+    this.deadLetterQueue.grantConsumeMessages(this.redrive);
+    this.queue.grantSendMessages(this.redrive);
+    new events.Rule(this, 'RedriveSchedule', {
+      description: 'Put valid usage records parked in the metering DLQ back on the retry queue',
+      schedule: events.Schedule.cron({ minute: '0', hour: '4' }),
+      targets: [new eventsTargets.LambdaFunction(this.redrive, { retryAttempts: 2 })],
+    });
 
     const parked = new cloudwatch.Alarm(this, 'DlqAlarm', {
       alarmDescription: 'Usage records could not be recorded after retries: check the metering DLQ, fix, then redrive',
@@ -561,7 +593,7 @@ export interface MeteringProps {
 }
 
 /** Log terms that mean money may be wrong or calls are refused; each alarms within 5 minutes. */
-const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED', 'RESERVATION_EXCEEDED'];
+const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED', 'RESERVATION_EXCEEDED', 'USAGE_RECORD_PARKED'];
 
 /**
  * FairMeter's infrastructure, from one config: the retry queue (MeteringRetry), the sweeper that
@@ -670,6 +702,7 @@ export class Metering extends Construct {
       this.sweeper.metricErrors({ period: cdk.Duration.minutes(10) }));
     // A record retried from the queue can still turn out a conflict: its Lambda's logs feed the same alarm.
     this.watchErrors(this.retry.fn);
+    this.watchErrors(this.retry.redrive);
     alarm('ErrorsAlarm', `${where}: a metering error (${METERING_ERRORS.join(', ')}): check the app function's logs`, this.errors);
   }
 
