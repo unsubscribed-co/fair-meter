@@ -6,6 +6,7 @@ import { assertTierThresholds, budgetTier, DEFAULT_TIER_THRESHOLDS, type BudgetT
 import type { Meters } from './cost';
 import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, setTableKeys, skOf, tableKeys, utcDay, utcMinute, utcMonth, type TableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
+import { takeCapacity } from './measure';
 import { Meter } from './meter';
 import { priceCall, priceShape, pricingTime, reserveCost, versionCovers, type CallUsage, type PriceShape } from './pricing';
 import { canonicalMeters, isProvider, metersFromUsage, type Provider } from './usage';
@@ -463,7 +464,8 @@ export class FairMeter {
 
   /**
    * After a successful write: one JSON line to stdout (its own log event), which the rollup turns
-   * into an EVENT; no DynamoDB write. Synchronous, never throws. An SKU not configured or an `n`
+   * into an EVENT; no DynamoDB write. In measure mode (`measureCapacity`) the line also carries
+   * the units tallied since the last one, as `rru` and `wru`. Synchronous, never throws. An SKU not configured or an `n`
    * outside 1..1000 is an app bug: ACTION_UNKNOWN (alarms), no line.
    */
   action(req: { person: string; sku: string; n?: number }): void {
@@ -473,7 +475,7 @@ export class FairMeter {
         console.error('ACTION_UNKNOWN', { appId: this.cfg.appId, person, sku, n });
         return;
       }
-      process.stdout.write(JSON.stringify({ fairMeter: 'action', appId: this.cfg.appId, env: this.cfg.env, person, sku, n }) + '\n');
+      process.stdout.write(JSON.stringify({ fairMeter: 'action', appId: this.cfg.appId, env: this.cfg.env, person, sku, n, ...takeCapacity() }) + '\n');
       const counts = this.actionsThisMinute();
       counts.set(person, (counts.get(person) ?? 0) + n);
     } catch (err) {
