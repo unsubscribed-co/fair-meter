@@ -40,7 +40,8 @@ try {
 **`authorize({ person, sku, max, paidBy? })`**, before the attempt:
 - reads the SKU's price version valid now, the person's day, and the app and all-apps breakers;
 - reserves the most this attempt can cost against the person's daily cap, in one transaction (a `PENDING#<app>` row plus a conditional add on the day's `committedMicroUsd`), so parallel calls can't overshoot the cap;
-- `max`: tokens: `inputTokens` = the UTF-8 bytes of everything sent (always >= tokens), `outputTokens` = the `max_tokens` sent. `{ chars }`, `{ units }` or `{ requests }` for other prices;
+- `max` must bound the real usage: the cap is only as good as it. Tokens: `inputTokens` = the UTF-8 bytes of everything sent (text tokens are never fewer than bytes), `outputTokens` = the `max_tokens` sent. **The bytes bound fails for images and files sent by URL or file id** (a 100-byte URL can cost thousands of tokens): add the provider's token count for each such part. `{ chars }`, `{ units }` or `{ requests }` for other prices;
+- a malformed request (from untyped JavaScript) is refused with 500 `metering_unavailable` and alarms; `authorize` never throws;
 - returns `{ ok: true, tier, callId, hold }` (one fresh `callId` per attempt), or `{ ok: false, status, body, headers }`: `daily_limit_reached` (429, `resetsAt`), `too_many_requests` (429, `Retry-After`), `service_paused`, `pricing_not_configured`, `metering_unavailable` (503).
 
 **`record(call, usage)`**, after the attempt, whatever happened. Settles the reservation exactly once:
@@ -53,7 +54,9 @@ try {
 | `'not_billed'` | an error status the provider doesn't bill (4xx, 5xx, 429) | nothing: the hold is released, no EVENT |
 | `undefined` or malformed | a 200 without usable usage | the reservation, `estimated: 'no_usage'`, USAGE_MISSING alarms |
 
-Outcomes: `recorded`, `duplicate`, `trued_up` (real usage after the sweeper's estimate, written as an ADJUST), `conflict` (another payload for a settled call: refused, RECORD_CONFLICT alarms), `deferred` (queued), `failed` (queue down too: USAGE_RECORD_FAILED; the sweeper still settles the hold). A cost above the reservation is recorded as it is and logs RESERVATION_EXCEEDED.
+Outcomes: `recorded`, `duplicate`, `trued_up` (real usage after the sweeper's estimate, written as an ADJUST), `conflict` (another payload for a settled call: refused, RECORD_CONFLICT alarms), `deferred` (queued), `failed` (queue down too: USAGE_RECORD_FAILED; the sweeper still settles the hold). A cost above the reservation is recorded as it is and logs RESERVATION_EXCEEDED, which alarms: it is the only sign that `max` didn't bound the call and the cap was overshot.
+
+If the reserve write fails ambiguously (a timeout or 5xx: it may have committed), `authorize` resends the identical write (same idempotency token) to learn the outcome. If it still can't tell, it refuses, releases any hold now, and queues a second release a minute later, so the sweeper never charges for a call that wasn't made.
 
 **`Metering`** (`fair-meter/cdk`), once per app and stage:
 
@@ -75,6 +78,16 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <n
 ```
 
 `sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
+
+### Known limits (v0.2.0)
+
+- **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the reservation. Conservative: the cap is tighter, never overshot.
+- **Request-priced counters count calls.** `{ requests: 3 }` costs 3 requests, but the counters add `requests` 1 (one call). The money is right.
+- **Late-usage ADJUSTs export only their cost.** Their meters and band stay on the ADJUST item, not in the export columns, and their `createdAt` is the call's time (so retries are identical), not when the correction was written.
+- **IAM is table-wide.** `grant(fn)` allows Query, Get, Put, Update and Delete on the whole table, including `PRICING#*` and other apps' rows; it could be narrowed by leading key.
+- **One hot partition per app.** Every attempt writes and deletes a `PENDING#<app>` row: about 500 attempts a second per app before DynamoDB's per-partition limit. Shard the key if an app gets there.
+- **`sync` only adds.** A version in the table that no file has (e.g. from the old admin CLI) is kept, and closed by the next file version. Nothing is overwritten, but the files are not yet the only home.
+- **The sweeper is serial, 60 s per run.** After an outage with thousands of open holds it takes several runs, each timing out (SweeperFailureAlarm). It converges, because settled rows disappear.
 
 What lands in the table: `USER#<person>` / `EVENT#<at>#<app>#<callId>` per settled attempt (with `env`, `paidBy`, `reservedMicroUsd`, `estimated` when it is), the usual day, month, app, all-apps and provider counters, and `PENDING#<app>` / `CALL#<callId>` while an attempt is open. All money is integer micro-USD, rounded up.
 
