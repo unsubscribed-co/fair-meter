@@ -1,10 +1,11 @@
-import { CloudWatchLogsClient, GetQueryResultsCommand, StartQueryCommand, type ResultField } from '@aws-sdk/client-cloudwatch-logs';
+import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ACTION_LAG_MS } from './actions';
 import type { FairMeterConfig } from './fair-meter';
 import { keys, pkNotExists, setTableKeys, skOf, tableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
+import { QUERY_ROW_LIMIT, runQuery } from './logs-insights';
 import { priceCall, versionStartedBy, versionCovers } from './pricing';
 
 /*
@@ -18,8 +19,6 @@ export const WINDOW_MS = 15 * 60_000;
 export const DUE_MS = 2 * WINDOW_MS;
 /** Catch-up per run, so a run stays well inside its timeout. */
 export const MAX_WINDOWS = 8;
-/** Logs Insights returns at most 10,000 rows: that many means some were cut. */
-const MAX_ROWS = 10_000;
 
 /** The Logs Insights query for one window: the lines `action()` writes, summed per person, SKU and env. */
 export function actionQuery(appId: string, windowStart: number): string {
@@ -54,8 +53,14 @@ export async function rollup(
     const prices = new Map<string, Record<string, any>[]>();
     for (; done.windows < MAX_WINDOWS && start + DUE_MS <= now.getTime(); start += WINDOW_MS) {
       const windowStart = new Date(start).toISOString();
-      const rows = await query(cwl, logGroups, cfg.appId, start);
-      if (rows.length >= MAX_ROWS) {
+      const rows = await runQuery(cwl, {
+        logGroupNames: logGroups,
+        // Whole seconds, both ends inclusive: the query's own @timestamp filter keeps windows apart.
+        startTime: start / 1000,
+        endTime: (start + WINDOW_MS) / 1000,
+        queryString: actionQuery(cfg.appId, start),
+      });
+      if (rows.length >= QUERY_ROW_LIMIT) {
         console.error('ROLLUP_TRUNCATED', { appId: cfg.appId, windowStart, rows: rows.length });
         throw new Error(`Rollup: the ${windowStart} window has ${rows.length} rows or more`);
       }
@@ -105,24 +110,6 @@ export async function rollup(
   } catch (err) {
     console.error('ROLLUP_FAILED', { appId: cfg.appId, ...done, err });
     throw err;
-  }
-}
-
-/** One window's rows, polled until Logs Insights completes the query. */
-async function query(cwl: CloudWatchLogsClient, logGroupNames: string[], appId: string, start: number): Promise<ResultField[][]> {
-  const { queryId } = await cwl.send(new StartQueryCommand({
-    logGroupNames,
-    // Whole seconds, both ends inclusive: the query's own @timestamp filter keeps windows apart.
-    startTime: start / 1000,
-    endTime: (start + WINDOW_MS) / 1000,
-    queryString: actionQuery(appId, start),
-    limit: MAX_ROWS,
-  }));
-  for (;;) {
-    const out = await cwl.send(new GetQueryResultsCommand({ queryId }));
-    if (out.status === 'Complete') return out.results ?? [];
-    if (out.status !== 'Scheduled' && out.status !== 'Running') throw new Error(`Rollup: query ${queryId} ended ${out.status}`);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 }
 

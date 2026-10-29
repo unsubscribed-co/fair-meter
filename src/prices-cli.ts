@@ -232,9 +232,6 @@ export function writePriceList(dir: string, list: PriceList, validFrom: string, 
 // ---------------------------------------------------------------------------------------------
 // The measurement: what each action used in dev, from the app's own logs (see measureCapacity).
 
-/** Logs Insights returns at most this many rows per query. */
-const QUERY_LIMIT = 10_000;
-
 /** A line's request id, in Lambda's text or JSON log format; raw stdout lines (the action line) have none. */
 function requestIdOf(message: string, json: any): string | undefined {
   if (json) return json.requestId ?? json.record?.requestId;
@@ -258,21 +255,14 @@ export async function measureApp(
   logs: CloudWatchLogsClient, app: string, run: { logGroup: string; start: Date; end: Date }, now: Date, dir = PRICES_DIR,
 ): Promise<string[]> {
   // An optional peer: only measure needs it.
-  const { StartQueryCommand, GetQueryResultsCommand } = await import('@aws-sdk/client-cloudwatch-logs');
-  const { queryId } = await logs.send(new StartQueryCommand({
+  const { QUERY_ROW_LIMIT, runQuery } = require('./logs-insights') as typeof import('./logs-insights');
+  const results = await runQuery(logs, {
     logGroupName: run.logGroup,
     startTime: Math.floor(run.start.getTime() / 1000),
     endTime: Math.ceil(run.end.getTime() / 1000),
     queryString: 'fields @timestamp, @logStream, @message | sort @timestamp asc',
-    limit: QUERY_LIMIT,
-  }));
-  let reply;
-  while ((reply = await logs.send(new GetQueryResultsCommand({ queryId }))).status !== 'Complete') {
-    if (reply.status !== 'Running' && reply.status !== 'Scheduled') throw new Error(`Logs Insights query ${reply.status}`);
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  const results = reply.results ?? [];
-  if (results.length >= QUERY_LIMIT) throw new Error(`${QUERY_LIMIT} lines or more: narrow --start and --end`);
+  });
+  if (results.length >= QUERY_ROW_LIMIT) throw new Error(`${QUERY_ROW_LIMIT} lines or more: narrow --start and --end`);
 
   // Group by request. A line without a request id belongs to the request open in its log stream.
   // shortcut: one request at a time per log stream (a Lambda environment); revisit if dev runs multi-concurrency Lambda Managed Instances.
