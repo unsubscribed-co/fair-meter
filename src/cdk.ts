@@ -562,7 +562,7 @@ export interface MeteringProps extends TableKeysProps {
 }
 
 /** Log terms that mean money may be wrong or calls are refused; each alarms within 5 minutes. */
-const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED'];
+const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED', 'RESERVATION_EXCEEDED'];
 
 /**
  * FairMeter's infrastructure, from one config: the retry queue (MeteringRetry), the sweeper that
@@ -655,6 +655,8 @@ export class Metering extends Construct {
       swept.metric({ statistic: 'Sum', period: cdk.Duration.minutes(10) }));
     alarm('SweeperFailureAlarm', `${where}: the metering sweeper failed; open reservations stay held until it runs: check its logs`,
       this.sweeper.metricErrors({ period: cdk.Duration.minutes(10) }));
+    // A record retried from the queue can still turn out a conflict: its Lambda's logs feed the same alarm.
+    this.watchErrors(this.retry.fn);
     alarm('ErrorsAlarm', `${where}: a metering error (${METERING_ERRORS.join(', ')}): check the app function's logs`, this.errors);
   }
 
@@ -666,6 +668,11 @@ export class Metering extends Construct {
     this.table.grant(fn, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
     this.retry.queue.grantSendMessages(fn);
     fn.addEnvironment('FAIR_METER', cdk.Stack.of(this).toJsonString(this.config));
+    this.watchErrors(fn);
+  }
+
+  /** Counts `fn`'s metering error lines into the ErrorsAlarm metric. */
+  private watchErrors(fn: lambda.Function) {
     new logs.MetricFilter(this, `Errors${this.grants++}`, {
       logGroup: fn.logGroup,
       filterPattern: logs.FilterPattern.anyTerm(...METERING_ERRORS),

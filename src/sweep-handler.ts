@@ -35,8 +35,14 @@ export async function sweep(ddb: DynamoDBDocumentClient, cfg: Pick<FairMeterConf
       try {
         const record = holdRecord({ appId: cfg.appId, env: String(row.env ?? cfg.env), callId, hold: row as HoldFacts }, 'swept');
         const outcome = await recordUsage(ddb, cfg.tableName, record);
-        console.error('SETTLED_BY_SWEEPER', { appId: cfg.appId, callId, person: row.person, sku: row.sku, at: row.at, reservedMicroUsd: row.reservedMicroUsd, outcome });
-        settled++;
+        const facts = { appId: cfg.appId, callId, person: row.person, sku: row.sku, at: row.at, reservedMicroUsd: row.reservedMicroUsd, outcome };
+        if (outcome === 'recorded') {
+          console.error('SETTLED_BY_SWEEPER', facts);
+          settled++;
+        } else {
+          // The app's own settle or release got there first (or a late true-up did): nothing to alarm.
+          console.log('SWEEP_LOST_RACE', facts);
+        }
       } catch (err) {
         console.error('SWEEP_FAILED', { appId: cfg.appId, callId, err });
         failed++;

@@ -1,6 +1,6 @@
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { setTableKeys } from '../keys';
 import { sweep } from '../sweep-handler';
 
@@ -41,6 +41,16 @@ test('settles holds older than 30 minutes at their reservation, swept; younger o
   });
   expect(tx.TransactItems!.at(-1)!.Delete!.Key).toEqual({ pk: 'PENDING#stacksplit', sk: 'CALL#a' });
   expect(console.error).toHaveBeenCalledWith('SETTLED_BY_SWEEPER', expect.objectContaining({ callId: 'a', person: 'ana@x.co', sku: 'claude-haiku-5-5', reservedMicroUsd: 5_798 }));
+});
+
+test("L2: a sweeper that lost the race to the app's own settle neither counts nor alarms", async () => {
+  ddbMock.on(QueryCommand).resolves({ Items: [row('a')] });
+  ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('x'), { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed' }] }));
+  ddbMock.on(GetCommand).resolves({ Item: { usageHash: 'the app settled it' } });
+  jest.spyOn(console, 'log').mockImplementation(() => {});
+  expect(await sweep(ddb(), cfg, minutes(31))).toEqual({ settled: 0 });
+  expect(console.error).not.toHaveBeenCalledWith('SETTLED_BY_SWEEPER', expect.anything());
+  expect(console.log).toHaveBeenCalledWith('SWEEP_LOST_RACE', expect.objectContaining({ callId: 'a', outcome: 'duplicate' }));
 });
 
 test('a row that fails is retried on the next run; the run fails so the Errors alarm fires', async () => {

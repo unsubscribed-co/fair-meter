@@ -44,12 +44,12 @@ test('the app function may reserve, settle and queue', () => {
   for (const action of ['dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'sqs:SendMessage']) expect(policies).toContain(action);
 });
 
-test('the metering-error alarm watches the app function logs', () => {
+test('the metering-error alarm watches the app function logs and the retry Lambda logs (M2)', () => {
   const { t } = synth();
-  t.hasResourceProperties('AWS::Logs::MetricFilter', {
-    FilterPattern: Match.stringLikeRegexp('METER_UNAVAILABLE.*PRICE_MISSING.*SERVICE_PAUSED.*CALL_EXCEEDS_CAP.*CALL_ID_REUSED.*USAGE_MISSING.*RECORD_CONFLICT.*USAGE_RECORD_FAILED'),
-    LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') },
-  });
+  const pattern = Match.stringLikeRegexp('METER_UNAVAILABLE.*PRICE_MISSING.*SERVICE_PAUSED.*CALL_EXCEEDS_CAP.*CALL_ID_REUSED.*USAGE_MISSING.*RECORD_CONFLICT.*USAGE_RECORD_FAILED.*RESERVATION_EXCEEDED');
+  t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: pattern, LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') }, MetricTransformations: [Match.objectLike({ MetricName: 'stacksplit-prod-MeteringErrors' })] });
+  // Conflicts found when a queued record is retried are logged there.
+  t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: pattern, LogGroupName: { Ref: Match.stringLikeRegexp('^MeteringRetryLogs') }, MetricTransformations: [Match.objectLike({ MetricName: 'stacksplit-prod-MeteringErrors' })] });
   t.hasResourceProperties('AWS::CloudWatch::Alarm', { MetricName: 'stacksplit-prod-MeteringErrors', Threshold: 1, Period: 300, AlarmActions: ['arn:aws:sns:us-east-2:111111111111:a'] });
 });
 
