@@ -3,7 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import type { SQSEvent } from 'aws-lambda';
-import { FairMeter, type FairMeterConfig, type Reservation } from '../fair-meter';
+import { FairMeter, resetsAtLocal, type FairMeterConfig, type Reservation } from '../fair-meter';
 import { setTableKeys } from '../keys';
 import { Meter } from '../meter';
 
@@ -212,6 +212,20 @@ describe('authorize', () => {
   });
 });
 
+describe("a price's first context tier (README, under max)", () => {
+  const tiered = { ...haiku, tiers: [{ aboveInputTokens: 100_000, inputMicroUsdPerMTok: 500_000, cachedInputMicroUsdPerMTok: 50_000, cacheWriteMicroUsdPerMTok: 625_000, outputMicroUsdPerMTok: 2_500_000 }] };
+
+  test('a counted bound under the threshold reserves at the base rate; a bytes bound over it, at the tier', async () => {
+    prices = [tiered];
+    const counted = (await meter().authorize({ ...ask, max: { inputTokens: 90_000, outputTokens: 1_000 } })) as Reservation;
+    // Every input token at the dearest input-side rate (cache write, $0.125 per million), output at $0.50.
+    expect(counted.hold.reservedMicroUsd).toBe(11_250 + 500);
+    const bytes = (await meter().authorize({ ...ask, max: { inputTokens: 400_000, outputTokens: 1_000 } })) as Reservation;
+    // The tier's rates, five times as much: $0.625 and $2.50 per million.
+    expect(bytes.hold.reservedMicroUsd).toBe(250_000 + 2_500);
+  });
+});
+
 describe('record', () => {
   const reserve = async () => (await meter().authorize(ask)) as Reservation;
   const settled = () => sentTransactions().at(-1)!.TransactItems![0].Put?.Item;
@@ -260,11 +274,20 @@ describe('record', () => {
     expect(console.error).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.anything());
   });
 
-  test.each([[undefined], [{}], [{ input_tokens: 'many' }], [{ estimate: 'oops' }]])('T6: no usable usage (%p): the reservation, no_usage-style, USAGE_MISSING', async (usage) => {
+  test.each([[undefined], [{}], [{ input_tokens: 'many' }], [{ estimate: 'oops' }], [{ estimate: { inputTokens: 7_000 } }], [{ estimate: { inputTokens: 7_000, outputTokens: 0, reasoningTokens: -1 } }]])('T6: no usable usage (%p): the reservation, no_usage-style, USAGE_MISSING', async (usage) => {
     const call = await reserve();
     expect(await meter().record(call, usage as object | undefined)).toBe('recorded');
     expect(settled()).toMatchObject({ costMicroUsd: 5_798, estimated: (usage as any)?.estimate ? 'aborted' : 'no_usage' });
     expect(console.error).toHaveBeenCalledWith('USAGE_MISSING', expect.objectContaining({ callId: call.callId }));
+  });
+
+  test("'not_sent': exactly the release 'not_billed' writes", async () => {
+    const call = await reserve();
+    await meter().record(call, 'not_sent');
+    await meter().record(call, 'not_billed');
+    const [notSent, notBilled] = sentTransactions().slice(-2);
+    expect(notSent).toEqual(notBilled);
+    expect(notSent.TransactItems!.map((i) => Object.keys(i)[0])).toEqual(['Delete', 'Update']);
   });
 
   test("T8: 'not_billed': the hold released, no EVENT", async () => {
@@ -392,3 +415,18 @@ describe('T19: config, refused at startup', () => {
   });
 });
 
+
+describe('resetsAtLocal', () => {
+  const bogota = { timeZone: 'America/Bogota', now: AT };
+
+  test("today's reset in the person's own time and language (America/Bogota is UTC-5)", () => {
+    // ICU versions differ on the space before PM (a plain, narrow or no-break space).
+    expect(resetsAtLocal('2026-11-04T00:00:00.000Z', { locale: 'en', ...bogota })).toEqual({ time: expect.stringMatching(/^7:00\sPM$/), relative: 'in 10 hours' });
+    expect(resetsAtLocal('2026-11-04T00:00:00.000Z', { locale: 'es', ...bogota })).toEqual({ time: '19:00', relative: 'dentro de 10 horas' });
+  });
+
+  test('under an hour in minutes, a day or more in days', () => {
+    expect(resetsAtLocal('2026-11-03T15:00:00.000Z', { locale: 'es', ...bogota }).relative).toBe('dentro de 55 minutos');
+    expect(resetsAtLocal('2026-12-01T00:00:00.000Z', { locale: 'en', ...bogota }).relative).toBe('in 27 days');
+  });
+});

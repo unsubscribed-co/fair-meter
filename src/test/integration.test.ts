@@ -187,6 +187,30 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect(charged(await month('est@x.co'))).toBe(0);
   });
 
+  test('{ estimate } in canonical meters: aborted at that estimate, the same as the provider block', async () => {
+    const call = (await meter().authorize(ask('canon@x.co'))) as Reservation;
+    expect(await meter().record(call, { estimate: { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 4000, cacheWriteTokens: 2000 } })).toBe('recorded');
+    expect(await events('canon@x.co')).toEqual([expect.objectContaining({
+      costMicroUsd: 440, estimated: 'aborted', absorbedMicroUsd: 440, inputTokens: 1000, cacheReadTokens: 4000, cacheWriteTokens: 2000, outputTokens: 100, reasoningTokens: 0,
+    })]);
+    expect(await day('canon@x.co')).toMatchObject({ committedMicroUsd: 440, costMicroUsd: 440 });
+    expect(await pendingOf('canon@x.co')).toHaveLength(0);
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  test("'not_sent': the hold released like 'not_billed', and one after the other is a duplicate", async () => {
+    const call = (await meter().authorize(ask('ns@x.co'))) as Reservation;
+    expect(await day('ns@x.co')).toMatchObject({ committedMicroUsd: RESERVED });
+    expect(await meter().record(call, 'not_sent')).toBe('recorded');
+    expect(await day('ns@x.co')).toMatchObject({ committedMicroUsd: 0 });
+    expect(await events('ns@x.co')).toHaveLength(0);
+    expect(await pendingOf('ns@x.co')).toHaveLength(0);
+    // The same record: DynamoDB's token makes the repeat a silent success; after 10 minutes the condition says duplicate.
+    expect(['recorded', 'duplicate']).toContain(await meter().record(call, 'not_billed'));
+    expect(await day('ns@x.co')).toMatchObject({ committedMicroUsd: 0 });
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
   test("T8: 'not_billed': no EVENT, PENDING gone, committed back where it was", async () => {
     const first = (await meter().authorize(ask('t8@x.co'))) as Reservation;
     await meter().record(first, usage);
