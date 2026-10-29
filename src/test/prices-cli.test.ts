@@ -2,7 +2,10 @@ import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { setTableKeys } from '../keys';
-import { formatPriceHistory, loadPriceFiles, parsePriceFile, syncPrices, type PriceFile } from '../prices-cli';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { feeAt, formatPriceHistory, loadPriceFiles, parseFeeFile, parsePriceFile, syncPrices, type PriceFile } from '../prices-cli';
 import { priceShape } from '../pricing';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -48,6 +51,88 @@ describe('the price files in prices/', () => {
   ])('refused: %s', (_, bad) => {
     const { sku, ...body } = { ...haiku, ...bad };
     expect(() => parsePriceFile(sku, JSON.stringify(body))).toThrow();
+  });
+});
+
+describe('action SKUs: per 1,000 actions, with their components', () => {
+  const action = {
+    provider: 'aws',
+    unit: 'units',
+    versions: [{
+      validFrom: '2026-11-01T00:00:00Z',
+      microUsdPerKUnits: 1_000,
+      components: { database: 400, api: 300, compute: 200, logs: 100, other: 0 },
+      source: 'https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/index.json',
+    }],
+  };
+  const withComponents = (components: unknown) => JSON.stringify({ ...action, versions: [{ ...action.versions[0], components }] });
+
+  test('a components file parses as a units SKU', () => {
+    const f = parsePriceFile('stacksplit-add-expense', JSON.stringify(action));
+    expect(f).toEqual({ sku: 'stacksplit-add-expense', ...action });
+    expect(priceShape({ provider: f.provider, ...f.versions[0] })).toBe('units');
+  });
+
+  test.each([
+    ['a sum that is not the price', { database: 400, api: 300, compute: 200, logs: 100, other: 1 }],
+    ['a missing component', { database: 500, api: 300, compute: 200 }],
+    ['an unknown component', { database: 400, api: 300, compute: 200, logs: 100, storage: 0 }],
+    ['a float component', { database: 399.5, api: 300.5, compute: 200, logs: 100, other: 0 }],
+    ['a negative component', { database: 500, api: 300, compute: 200, logs: 100, other: -100 }],
+    ['not an object', [400, 300, 200, 100, 0]],
+  ])('refused, naming the file and version: %s', (_, components) => {
+    expect(() => parsePriceFile('stacksplit-add-expense', withComponents(components)))
+      .toThrow(/^prices\/stacksplit-add-expense\.json: version 2026-11-01T00:00:00Z: components/);
+  });
+
+  test('components only on a units SKU', () => {
+    const { sku, ...body } = haiku;
+    const bad = { ...body, versions: [{ ...body.versions[0], components: action.versions[0].components }] };
+    expect(() => parsePriceFile(sku, JSON.stringify(bad))).toThrow(/unknown fields components/);
+  });
+
+  test('price-history shows the components', () => {
+    const text = formatPriceHistory('stacksplit-add-expense', [{ pk: 'PRICING#stacksplit-add-expense', sk: '2026-11-01T00:00:00Z', provider: 'aws', ...action.versions[0] }]);
+    expect(text).toBe('stacksplit-add-expense@2026-11-01T00:00:00Z  [2026-11-01T00:00:00Z .. open)  $0.001000/1,000 units' +
+      ' (database $0.000400 api $0.000300 compute $0.000200 logs $0.000100 other $0.000000)  aws');
+  });
+});
+
+describe('the fee: prices/fee.json', () => {
+  const fee = (versions: unknown) => JSON.stringify({ versions });
+
+  test('one version: 100% of cost, from the day it was decided', () => {
+    expect(feeAt(new Date('2026-10-29T00:00:00Z'))).toEqual({ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000 });
+    expect(feeAt(new Date('2030-01-01T00:00:00Z')).feeBps).toBe(10_000);
+    expect(() => feeAt(new Date('2026-10-28T23:59:59Z'))).toThrow(/no fee version at 2026-10-28T23:59:59Z/);
+  });
+
+  test('feeAt picks the version valid at a time', () => {
+    const file = parseFeeFile(fee([{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000 }, { validFrom: '2027-01-01T00:00:00Z', feeBps: 5_000 }]));
+    expect(feeAt(new Date('2026-12-31T23:59:59Z'), file).feeBps).toBe(10_000);
+    expect(feeAt(new Date('2027-01-01T00:00:00Z'), file).feeBps).toBe(5_000);
+  });
+
+  test.each([
+    ['no versions', []],
+    ['versions out of order', [{ validFrom: '2027-01-01T00:00:00Z', feeBps: 0 }, { validFrom: '2026-10-29T00:00:00Z', feeBps: 0 }]],
+    ['a non-canonical validFrom', [{ validFrom: '2026-10-29', feeBps: 10_000 }]],
+    ['a float fee', [{ validFrom: '2026-10-29T00:00:00Z', feeBps: 9_999.5 }]],
+    ['a fee above 100%', [{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_001 }]],
+    ['a negative fee', [{ validFrom: '2026-10-29T00:00:00Z', feeBps: -1 }]],
+    ['an unknown field (a typo)', [{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000, feeBP: 1 }]],
+  ])('refused: %s', (_, versions) => {
+    expect(() => parseFeeFile(fee(versions))).toThrow(/^prices\/fee\.json: /);
+  });
+
+  test('loadPriceFiles reads only SKU files: not fee.json, not prices/apps/', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'prices-'));
+    const { sku, ...body } = haiku;
+    writeFileSync(path.join(dir, `${sku}.json`), JSON.stringify(body));
+    writeFileSync(path.join(dir, 'fee.json'), fee([{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000 }]));
+    mkdirSync(path.join(dir, 'apps'));
+    writeFileSync(path.join(dir, 'apps', 'stacksplit.json'), '{}');
+    expect(loadPriceFiles(dir).map((f) => f.sku)).toEqual([sku]);
   });
 });
 

@@ -5,7 +5,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { formatUsd } from './cost';
 import { setTableKeys, skOf, tableKeys } from './keys';
-import { parseValidFrom, planNewVersion, priceShape, versionRanges, type PriceShape } from './pricing';
+import { parseValidFrom, planNewVersion, priceShape, pricingTime, versionRanges, type PriceShape } from './pricing';
 import { parseFlags } from './report';
 import { isProvider } from './usage';
 
@@ -32,12 +32,17 @@ export interface PriceFile {
   versions: ({ validFrom: string; source: string } & Record<string, unknown>)[];
 }
 
+/** An action SKU's breakdown of microUsdPerKUnits, each integer micro-USD per 1,000 actions. */
+const COMPONENTS = ['database', 'api', 'compute', 'logs', 'other'];
+
 const RATE_FIELDS: Record<PriceShape, string[]> = {
   tokens: ['inputMicroUsdPerMTok', 'cachedInputMicroUsdPerMTok', 'outputMicroUsdPerMTok', 'cacheWriteMicroUsdPerMTok', 'reasoningMicroUsdPerMTok', 'tiers', 'bands'],
   chars: ['microUsdPerMChars'],
-  units: ['microUsdPerKUnits'],
+  units: ['microUsdPerKUnits', 'components'],
   requests: ['microUsdPerRequest'],
 };
+
+const isCanonical = (t: unknown): t is string => typeof t === 'string' && t.includes('T') && parseValidFrom(t) === t;
 
 /** One prices/<sku>.json, checked strictly: a typo must not become a price. */
 export function parsePriceFile(sku: string, text: string): PriceFile {
@@ -51,22 +56,64 @@ export function parsePriceFile(sku: string, text: string): PriceFile {
   let previous = '';
   for (const v of f.versions) {
     const at = `version ${v.validFrom}`;
-    if (typeof v.validFrom !== 'string' || parseValidFrom(v.validFrom) !== v.validFrom || !v.validFrom.includes('T')) fail(`${at}: validFrom must be YYYY-MM-DDTHH:MM:SSZ`);
+    if (!isCanonical(v.validFrom)) fail(`${at}: validFrom must be YYYY-MM-DDTHH:MM:SSZ`);
     if (v.validFrom <= previous) fail(`${at}: versions must be in order, oldest first`);
     previous = v.validFrom;
     if (typeof v.source !== 'string' || !v.source.startsWith('https://')) fail(`${at}: source must be the https URL of the provider's pricing page`);
     const unknown = Object.keys(v).filter((k) => k !== 'validFrom' && k !== 'source' && !RATE_FIELDS[f.unit].includes(k));
     if (unknown.length) fail(`${at}: unknown fields ${unknown.join(', ')}`);
     if (priceShape({ provider: f.provider, ...v }) !== f.unit) fail(`${at}: rates are malformed or not ${f.unit}`);
+    if (v.components !== undefined) {
+      const c = v.components as Record<string, unknown>;
+      const exact = typeof c === 'object' && c !== null && Object.keys(c).sort().join() === [...COMPONENTS].sort().join() &&
+        COMPONENTS.every((k) => Number.isSafeInteger(c[k]) && (c[k] as number) >= 0);
+      if (!exact) fail(`${at}: components must be exactly ${COMPONENTS.join(', ')}, each integer micro-USD per 1,000`);
+      if (COMPONENTS.reduce((sum, k) => sum + (c[k] as number), 0) !== v.microUsdPerKUnits) fail(`${at}: components must sum to microUsdPerKUnits`);
+    }
   }
   return { sku, ...f };
 }
 
 export function loadPriceFiles(dir = PRICES_DIR): PriceFile[] {
   return readdirSync(dir)
-    .filter((n) => n.endsWith('.json'))
+    .filter((n) => n.endsWith('.json') && n !== FEE_FILE)
     .sort()
     .map((n) => parsePriceFile(n.slice(0, -'.json'.length), readFileSync(path.join(dir, n), 'utf8')));
+}
+
+/**
+ * The fee's one home: prices/fee.json, versioned like a price, in basis points of cost (10000 = 100%).
+ * Nothing at runtime applies it yet: billing 'none' means no fee, and 'hosted' is refused.
+ */
+export interface FeeFile {
+  /** Oldest first. */
+  versions: { validFrom: string; feeBps: number }[];
+}
+
+const FEE_FILE = 'fee.json';
+
+export function parseFeeFile(text: string): FeeFile {
+  const f = JSON.parse(text) as FeeFile;
+  const fail = (why: string) => { throw new Error(`prices/${FEE_FILE}: ${why}`); };
+  if (!Array.isArray(f.versions) || f.versions.length === 0) fail('versions must be a non-empty array');
+  let previous = '';
+  for (const v of f.versions) {
+    const at = `version ${v.validFrom}`;
+    if (!isCanonical(v.validFrom)) fail(`${at}: validFrom must be YYYY-MM-DDTHH:MM:SSZ`);
+    if (v.validFrom <= previous) fail(`${at}: versions must be in order, oldest first`);
+    previous = v.validFrom;
+    if (Object.keys(v).sort().join() !== 'feeBps,validFrom') fail(`${at}: a version is exactly validFrom and feeBps`);
+    if (!Number.isInteger(v.feeBps) || v.feeBps < 0 || v.feeBps > 10_000) fail(`${at}: feeBps must be an integer from 0 to 10000`);
+  }
+  return f;
+}
+
+/** The fee version valid at `at`. */
+export function feeAt(at: Date, fee = parseFeeFile(readFileSync(path.join(PRICES_DIR, FEE_FILE), 'utf8'))): FeeFile['versions'][number] {
+  const t = pricingTime(at);
+  const version = [...fee.versions].reverse().find((v) => v.validFrom <= t);
+  if (!version) throw new Error(`prices/${FEE_FILE}: no fee version at ${t}`);
+  return version;
 }
 
 const itemOf = (f: PriceFile, v: PriceFile['versions'][number]) => ({ provider: f.provider, ...v });
@@ -164,7 +211,8 @@ export function formatPriceHistory(sku: string, items: Record<string, any>[]): s
     const item = items.find((i) => skOf(i) === range.sk)!;
     const rates = item.microUsdPerMChars !== undefined ? `${formatUsd(item.microUsdPerMChars)}/1M chars`
       : item.microUsdPerRequest !== undefined ? `${formatUsd(item.microUsdPerRequest)}/request`
-        : item.microUsdPerKUnits !== undefined ? `${formatUsd(item.microUsdPerKUnits)}/1,000 units`
+        : item.microUsdPerKUnits !== undefined ? `${formatUsd(item.microUsdPerKUnits)}/1,000 units` +
+          (item.components ? ` (${COMPONENTS.map((k) => `${k} ${formatUsd(item.components[k])}`).join(' ')})` : '')
           : `in ${formatUsd(item.inputMicroUsdPerMTok)} cached ${formatUsd(item.cachedInputMicroUsdPerMTok)} out ${formatUsd(item.outputMicroUsdPerMTok)} /1M` +
             (item.cacheWriteMicroUsdPerMTok !== undefined ? ` cache-write ${formatUsd(item.cacheWriteMicroUsdPerMTok)}` : '') +
             (item.reasoningMicroUsdPerMTok !== undefined ? ` reasoning ${formatUsd(item.reasoningMicroUsdPerMTok)}` : '') +

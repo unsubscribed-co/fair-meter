@@ -79,6 +79,10 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <n
 
 `sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
 
+**Action SKUs** are ordinary price files, `prices/<app>-<action>.json`, with `provider: "aws"` and `unit: "units"` (one unit is one action). Each version has `microUsdPerKUnits` and `components: { database, api, compute, logs, other }`, integer micro-USD per 1,000 actions; the parser requires exactly those five and their sum equal to `microUsdPerKUnits`, and `source` is the AWS Price List URL. They sync and price like any `units` SKU, and `price-history` shows the components. None is seeded yet: the first ones come from a measurement.
+
+**The fee** has one home, `prices/fee.json`: `{ "versions": [{ "validFrom", "feeBps" }] }`, in basis points of cost, versioned like a price (today 10000, 100% of cost, from 2026-10-29). `billing: 'none'` means no fee: v0.3.0 never applies it, and `'hosted'` (which will) is refused until the wallet exists. `sync` skips `fee.json` and `prices/apps/`.
+
 ### Known limits (v0.2.0)
 
 - **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the reservation. Conservative: the cap is tighter, never overshot.
