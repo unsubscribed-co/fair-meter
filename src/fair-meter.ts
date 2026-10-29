@@ -156,6 +156,21 @@ export class FairMeter {
    * against the person's daily cap, atomically. Never throws: a refusal is a ready HTTP answer.
    */
   async authorize(req: CallRequest): Promise<Reservation | Refusal> {
+    const bad = badRequest(req);
+    if (bad) {
+      // An app bug (TypeScript callers can't get here): refused and alarmed, never thrown.
+      console.error('METER_UNAVAILABLE', { appId: this.cfg.appId, reason: bad, req });
+      return refuse(500, 'metering_unavailable');
+    }
+    try {
+      return await this.reserve(req);
+    } catch (err) {
+      console.error('METER_UNAVAILABLE', { appId: this.cfg.appId, person: req.person, sku: req.sku, err });
+      return refuse(503, 'metering_unavailable');
+    }
+  }
+
+  private async reserve(req: CallRequest): Promise<Reservation | Refusal> {
     const { appId, tableName: table } = this.cfg;
     const at = this.now();
     const day = utcDay(at);
@@ -249,14 +264,17 @@ export class FairMeter {
           return refuse(500, 'metering_unavailable');
         }
         if (reasons[1]?.Code === 'ConditionalCheckFailed') return this.limitReached(log, at, tier);
-        // Parallel holds on the same day counter conflict; the condition then decides, so retry.
-        if (attempt < 2 && reasons.some((r) => r.Code === 'TransactionConflict')) {
+        // A cancellation is definite: nothing was written. Anything else (a timeout, a 5xx, a
+        // transaction still in progress) may have committed or may still commit.
+        const ambiguous = !reasons.length;
+        // Parallel holds on one day counter conflict, and the condition then decides; an ambiguous
+        // failure is resolved by the identical resend: same token, so a no-op if it committed.
+        if (attempt < 2 && (ambiguous || reasons.some((r) => r.Code === 'TransactionConflict'))) {
           await jitter();
           continue;
         }
-        // It may have committed before failing: give the hold back so the cap isn't held for nothing.
-        const released = await recordUsage(this.ddb, table, this.settlement({ ok: true, tier, callId, hold }, 'not_billed')).catch((e) => e);
-        console.error('METER_UNAVAILABLE', { ...log, callId, err, released });
+        console.error('METER_UNAVAILABLE', { ...log, callId, err });
+        if (ambiguous) await this.giveBack({ ok: true, tier, callId, hold });
         return refuse(503, 'metering_unavailable');
       }
     }
@@ -323,9 +341,27 @@ export class FairMeter {
       return holdRecord(facts, estimate ? 'aborted' : 'no_usage');
     }
     if (priced.costMicroUsd > h.reservedMicroUsd) {
-      console.warn('RESERVATION_EXCEEDED', { appId: this.cfg.appId, callId: call.callId, person: h.person, sku: h.sku, costMicroUsd: priced.costMicroUsd, reservedMicroUsd: h.reservedMicroUsd });
+      // The only sign the cap was overshot (max didn't bound the real usage): it alarms.
+      console.error('RESERVATION_EXCEEDED', { appId: this.cfg.appId, callId: call.callId, person: h.person, sku: h.sku, costMicroUsd: priced.costMicroUsd, reservedMicroUsd: h.reservedMicroUsd });
     }
     return holdRecord(facts, { usage: callUsage as CallUsage, ...priced }, estimate ? 'aborted' : undefined);
+  }
+
+  /**
+   * A hold that may exist although authorize refused (the provider is never called): released
+   * now, and again from the queue a minute later in case the reserve commits after this release.
+   * The sweeper must never settle a call that wasn't made.
+   */
+  private async giveBack(call: Reservation) {
+    const release = this.settlement(call, 'not_billed');
+    const queue = (DelaySeconds?: number) =>
+      this.sqs.send(new SendMessageCommand({ QueueUrl: this.cfg.retryQueueUrl, MessageBody: JSON.stringify(release), ...(DelaySeconds ? { DelaySeconds } : {}) }));
+    try {
+      await recordUsage(this.ddb, this.cfg.tableName, release);
+    } catch (err) {
+      await queue().catch((queueErr) => console.error('USAGE_RECORD_FAILED', { record: release, err, queueErr }));
+    }
+    await queue(60).catch((queueErr) => console.error('USAGE_RECORD_FAILED', { record: release, queueErr, delayed: true }));
   }
 
   private limitReached(log: Record<string, unknown>, at: Date, tier: BudgetTier): Refusal {
@@ -336,6 +372,16 @@ export class FairMeter {
   private async get(key: Record<string, string>) {
     return (await this.ddb.send(new GetCommand({ TableName: this.cfg.tableName, Key: key, ConsistentRead: true }))).Item;
   }
+}
+
+/** Why a request from an untyped caller can't be served, or undefined. */
+function badRequest(req: CallRequest | undefined): string | undefined {
+  if (!req || typeof req !== 'object') return 'no request';
+  if (typeof req.person !== 'string' || !req.person) return 'a request without person';
+  if (typeof req.sku !== 'string' || !req.sku) return 'a request without sku';
+  if (typeof req.max !== 'object' || req.max === null) return 'a request without max';
+  if (req.paidBy !== undefined && req.paidBy !== 'credit' && req.paidBy !== 'paid') return 'a request with an unknown paidBy';
+  return undefined;
 }
 
 const jitter = () => new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 150));

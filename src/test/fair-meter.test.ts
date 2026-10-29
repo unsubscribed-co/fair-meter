@@ -163,13 +163,52 @@ describe('authorize', () => {
     expect(second).toEqual(first);
   });
 
-  test('the reserve throws (maybe after it committed): best-effort release, then 503', async () => {
+  test('M3: an ambiguous reserve failure is resolved by resending the identical reserve (same token)', async () => {
+    // It may have committed: the resend is a no-op success then, or does the reserve now. Either way the hold is real.
     ddbMock.on(TransactWriteCommand).rejectsOnce(new Error('socket hang up')).resolves({});
+    expect(await meter().authorize(ask)).toMatchObject({ ok: true });
+    const [first, second] = sentTransactions();
+    expect(second).toEqual(first);
+    expect(sentTransactions()).toHaveLength(2);
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+  });
+
+  test('M3: still unresolved: refused, released inline, and a delayed release queued in case it commits later', async () => {
+    ddbMock.on(TransactWriteCommand).callsFake((input) => {
+      if (input.TransactItems[0].Put) throw Object.assign(new Error('timeout'), { name: 'TimeoutError' });
+      return {};
+    });
+    sqsMock.on(SendMessageCommand).resolves({});
     expect(await meter().authorize(ask)).toMatchObject({ ok: false, status: 503, body: { error: 'metering_unavailable' } });
-    const release = sentTransactions()[1];
+    const sent = sentTransactions();
+    expect(sent.filter((t) => t.TransactItems![0].Put)).toHaveLength(3);
+    const release = sent.find((t) => t.TransactItems![0].Delete)!;
     expect(release.TransactItems![0].Delete!.Key).toMatchObject({ pk: 'PENDING#stacksplit' });
     expect(release.TransactItems![1].Update!.ExpressionAttributeValues).toEqual({ ':held': -5_798 });
+    const queued = sqsMock.commandCalls(SendMessageCommand).map((c) => c.args[0].input);
+    expect(queued).toEqual([expect.objectContaining({ QueueUrl: 'https://sqs/retry', DelaySeconds: 60 })]);
+    expect(JSON.parse(queued[0].MessageBody!)).toMatchObject({ release: true, reservedMicroUsd: 5_798 });
     expect(console.error).toHaveBeenCalledWith('METER_UNAVAILABLE', expect.anything());
+  });
+
+  test('M3: the inline release fails too: it is queued (now and delayed), never left for the sweeper', async () => {
+    ddbMock.on(TransactWriteCommand).rejects(Object.assign(new Error('timeout'), { name: 'TimeoutError' }));
+    sqsMock.on(SendMessageCommand).resolves({});
+    expect(await meter().authorize(ask)).toMatchObject({ ok: false, status: 503 });
+    const queued = sqsMock.commandCalls(SendMessageCommand).map((c) => c.args[0].input);
+    expect(queued.map((q) => q.DelaySeconds)).toEqual([undefined, 60]);
+    for (const q of queued) expect(JSON.parse(q.MessageBody!)).toMatchObject({ release: true });
+  });
+
+  test.each([
+    ['no request', undefined],
+    ['no max', { person: 'ana@x.co', sku: 'claude-haiku-5-5' }],
+    ['no person', { sku: 'claude-haiku-5-5', max: { inputTokens: 1, outputTokens: 1 } }],
+    ['a bad paidBy', { ...ask, paidBy: 'card' }],
+  ])('L7: a malformed request (%s) is refused, never thrown', async (_, req) => {
+    expect(await meter().authorize(req as never)).toEqual({ ok: false, status: 500, body: { error: 'metering_unavailable' }, headers: {} });
+    expect(console.error).toHaveBeenCalledWith('METER_UNAVAILABLE', expect.objectContaining({ reason: expect.stringContaining('request') }));
+    expect(sentTransactions()).toHaveLength(0);
   });
 });
 
@@ -210,14 +249,15 @@ describe('record', () => {
     const call = await reserve();
     expect(await meter().record(call, { estimate: { input_tokens: 100_000, output_tokens: 0 } })).toBe('recorded');
     expect(settled()).toMatchObject({ costMicroUsd: 10_000, estimated: 'aborted' });
-    expect(console.warn).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.objectContaining({ costMicroUsd: 10_000, reservedMicroUsd: 5_798 }));
+    // An error: it is the only sign the cap was overshot, so it alarms.
+    expect(console.error).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.objectContaining({ costMicroUsd: 10_000, reservedMicroUsd: 5_798 }));
   });
 
   test('T15 (mock): actual above the reservation: the actual cost, RESERVATION_EXCEEDED', async () => {
     const call = await reserve();
     expect(await meter().record(call, { input_tokens: 0, output_tokens: 20_000 })).toBe('recorded');
     expect(settled()).toMatchObject({ costMicroUsd: 10_000 });
-    expect(console.warn).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.anything());
+    expect(console.error).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.anything());
   });
 
   test.each([[undefined], [{}], [{ input_tokens: 'many' }], [{ estimate: 'oops' }]])('T6: no usable usage (%p): the reservation, no_usage-style, USAGE_MISSING', async (usage) => {

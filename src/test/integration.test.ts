@@ -1,6 +1,7 @@
 import { CreateTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { SQSClient } from '@aws-sdk/client-sqs';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
+import { mockClient } from 'aws-sdk-client-mock';
 import { FairMeter, type CallRequest, type FairMeterConfig, type Reservation } from '../fair-meter';
 import { setTableKeys } from '../keys';
 import { loadPriceFiles, syncPrices } from '../prices-cli';
@@ -15,6 +16,8 @@ const endpoint = process.env.DYNAMODB_ENDPOINT;
 if (process.env.CI && !endpoint) throw new Error('DYNAMODB_ENDPOINT is not set in CI');
 const suite = endpoint ? describe : describe.skip;
 
+// The queue is never reached in these tests except where a test says so.
+const sqsMock = mockClient(SQSClient);
 const TABLE = `fair-meter-it-${Date.now()}`;
 const raw = new DynamoDBClient({ endpoint, region: 'us-east-1', credentials: { accessKeyId: 'local', secretAccessKey: 'local' } });
 const ddb = DynamoDBDocumentClient.from(raw);
@@ -160,23 +163,60 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect(console.warn).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.anything());
   });
 
-  test('T17: the reserve throws after it committed: the hold is released, no PENDING left', async () => {
-    const flaky = new DynamoDBClient({ endpoint, region: 'us-east-1', credentials: { accessKeyId: 'local', secretAccessKey: 'local' } });
-    let failNext = true;
-    flaky.middlewareStack.add((next) => async (args) => {
+  /** A client whose reserve transactions commit, then report a failure `times` times (a lost response). */
+  function lossyReserves(times: number) {
+    const client = new DynamoDBClient({ endpoint, region: 'us-east-1', credentials: { accessKeyId: 'local', secretAccessKey: 'local' } });
+    const state = { left: times };
+    client.middlewareStack.add((next) => async (args) => {
       const out = await next(args);
       const input = JSON.stringify(args.input);
-      if (failNext && input.includes('PENDING#') && input.includes('"Put"')) {
-        failNext = false;
+      if (state.left > 0 && input.includes('PENDING#') && input.includes('"Put"')) {
+        state.left--;
         throw new Error('connection reset after the commit');
       }
       return out;
     }, { step: 'initialize' });
-    const result = await meter({}, DynamoDBDocumentClient.from(flaky)).authorize(ask('t17@x.co'));
-    expect(result).toMatchObject({ ok: false, status: 503 });
-    expect(failNext).toBe(false);
-    expect(await pendingOf('t17@x.co')).toHaveLength(0);
-    expect(await day('t17@x.co')).toMatchObject({ committedMicroUsd: 0 });
+    return { ddb: DynamoDBDocumentClient.from(client), state };
+  }
+
+  test('T17 / M3: the reserve committed but its answer was lost: the identical resend finds the hold (same token)', async () => {
+    const lossy = lossyReserves(1);
+    const result = await meter({}, lossy.ddb).authorize(ask('t17@x.co'));
+    expect(lossy.state.left).toBe(0);
+    expect(result).toMatchObject({ ok: true });
+    // Held once, not twice: DynamoDB Local honours the token on the resend.
+    expect(await pendingOf('t17@x.co')).toHaveLength(1);
+    expect(await day('t17@x.co')).toMatchObject({ committedMicroUsd: RESERVED });
+    expect(await meter().record(result as Reservation, usage)).toBe('recorded');
+  });
+
+  test('M3: still unresolved after the resends: refused, the committed hold released, a delayed release queued', async () => {
+    sqsMock.reset();
+    sqsMock.on(SendMessageCommand).resolves({});
+    const lossy = lossyReserves(3);
+    expect(await meter({}, lossy.ddb).authorize(ask('m3@x.co'))).toMatchObject({ ok: false, status: 503 });
+    expect(await pendingOf('m3@x.co')).toHaveLength(0);
+    expect(await day('m3@x.co')).toMatchObject({ committedMicroUsd: 0 });
+    expect(sqsMock.commandCalls(SendMessageCommand).map((c) => c.args[0].input.DelaySeconds)).toEqual([60]);
+    // Nothing is left for the sweeper to turn into a charge for a call never made.
+    await sweep(ddb, config, new Date(clock.getTime() + 31 * 60_000));
+    expect(await events('m3@x.co')).toHaveLength(0);
+  });
+
+  test('unverified in the design: a cancelled transaction does not use up its ClientRequestToken (DynamoDB Local only)', async () => {
+    const token = `cancelled-${Date.now()}`;
+    const gated = () => new TransactWriteCommand({
+      ClientRequestToken: token,
+      TransactItems: [
+        { ConditionCheck: { TableName: TABLE, Key: { pk: 'TOKEN#probe', sk: 'gate' }, ConditionExpression: 'attribute_exists(pk)' } },
+        { Put: { TableName: TABLE, Item: { pk: 'TOKEN#probe', sk: 'written' } } },
+      ],
+    });
+    await expect(ddb.send(gated())).rejects.toMatchObject({ name: 'TransactionCanceledException' });
+    await ddb.send(new PutCommand({ TableName: TABLE, Item: { pk: 'TOKEN#probe', sk: 'gate' } }));
+    // The identical request again, same token: it runs, rather than replaying the cancellation.
+    await ddb.send(gated());
+    expect(await get('TOKEN#probe', 'written')).toBeDefined();
   });
 
   test('T18: reserved at 23:59:59.900, settled after midnight: the earlier day and month', async () => {
