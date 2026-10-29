@@ -105,7 +105,7 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <n
 - **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the reservation. Conservative: the cap is tighter, never overshot.
 - **Request-priced counters count calls.** `{ requests: 3 }` costs 3 requests, but the counters add `requests` 1 (one call). The money is right.
 - **Late-usage ADJUSTs export only their cost.** Their meters and band stay on the ADJUST item, not in the export columns, and their `createdAt` is the call's time (so retries are identical), not when the correction was written.
-- **IAM is ledger-table-wide.** `grant(fn)` allows Query, Get, Put, Update and Delete on the whole ledger table, including `PRICING#*`; it could be narrowed by leading key. It never reaches the app's own tables.
+- **IAM is ledger-table-wide.** `grant(fn)` allows Query, Get, BatchGet, Put, Update and Delete on the whole ledger table, including `PRICING#*`; it could be narrowed by leading key. It never reaches the app's own tables.
 - **One hot partition per app.** Every attempt writes and deletes a `PENDING#<app>` row: about 500 attempts a second per app before DynamoDB's per-partition limit. Shard the key if an app gets there.
 - **`sync` only adds.** A version in the table that no file has (e.g. from the old admin CLI) is kept, and closed by the next file version. Nothing is overwritten, but the files are not yet the only home.
 - **The sweeper is serial, 60 s per run.** After an outage with thousands of open holds it takes several runs, each timing out (SweeperFailureAlarm). It converges, because settled rows disappear.
