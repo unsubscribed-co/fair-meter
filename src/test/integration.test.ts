@@ -59,6 +59,7 @@ suite('★ FairMeter against DynamoDB Local', () => {
   afterAll(() => setTableKeys(undefined));
   beforeEach(() => {
     clock = new Date('2026-11-03T14:05:09.120Z');
+    jest.spyOn(console, 'log').mockImplementation(() => {});
     jest.spyOn(console, 'error').mockImplementation(() => {});
     jest.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -258,6 +259,57 @@ suite('★ FairMeter against DynamoDB Local', () => {
     // The identical request again, same token: it runs, rather than replaying the cancellation.
     await ddb.send(gated());
     expect(await get('TOKEN#probe', 'written')).toBeDefined();
+  });
+
+  test('every authorize logs one AUTHORIZE_TIMING line, refusals included', async () => {
+    await meter().authorize(ask('timing@x.co'));
+    await meter().authorize({ ...ask('timing@x.co'), sku: 'no-such-sku' });
+    await meter().authorize({ ...ask('timing@x.co'), max: undefined } as unknown as CallRequest);
+    const ms = expect.any(Number);
+    const lines = (console.log as jest.Mock).mock.calls.filter(([term]) => term === 'AUTHORIZE_TIMING').map(([, fields]) => fields);
+    expect(lines).toEqual([
+      { appId: 'stacksplit', sku: 'claude-haiku-5-5', outcome: 'ok', readsMs: ms, reserveMs: ms, totalMs: ms, attempts: 1 },
+      { appId: 'stacksplit', sku: 'no-such-sku', outcome: 'pricing_not_configured', readsMs: ms, reserveMs: 0, totalMs: ms, attempts: 0 },
+      { appId: 'stacksplit', sku: 'claude-haiku-5-5', outcome: 'metering_unavailable', readsMs: 0, reserveMs: 0, totalMs: ms, attempts: 0 },
+    ]);
+  });
+
+  describe('price cache: one price query per SKU per 5 minutes per instance', () => {
+    const unitsAsk = (sku: string): CallRequest => ({ person: `${sku}@x.co`, sku, max: { units: 1 } });
+    const putVersion = (sku: string, validFrom: string, microUsdPerKUnits: number, validTo?: string) =>
+      ddb.send(new PutCommand({ TableName: TABLE, Item: { pk: `PRICING#${sku}`, sk: validFrom, validFrom, provider: 'aws', microUsdPerKUnits, ...(validTo ? { validTo } : {}) } }));
+    /** A client of its own, so the test sees how many price queries the meter sent. */
+    const counting = () => {
+      const client = DynamoDBDocumentClient.from(raw);
+      const send = jest.spyOn(client, 'send');
+      const priceQueries = () => send.mock.calls.filter(([c]) => c instanceof QueryCommand && String(c.input.ExpressionAttributeValues?.[':pk']).startsWith('PRICING#')).length;
+      return { client, priceQueries };
+    };
+
+    test('two authorizes within 5 minutes: one query, each priced at the version valid at its own time; a new query after 5', async () => {
+      await putVersion('it-cached', '2026-11-03T00:00:00Z', 1_000_000, '2026-11-03T15:00:00Z');
+      await putVersion('it-cached', '2026-11-03T15:00:00Z', 2_000_000);
+      const { client, priceQueries } = counting();
+      const m = meter({}, client);
+      clock = new Date('2026-11-03T14:58:00.000Z');
+      expect(await m.authorize(unitsAsk('it-cached'))).toMatchObject({ ok: true, hold: { pricingVersion: 'it-cached@2026-11-03T00:00:00Z', reservedMicroUsd: 1_000 } });
+      clock = new Date('2026-11-03T15:02:59.999Z');
+      expect(await m.authorize(unitsAsk('it-cached'))).toMatchObject({ ok: true, hold: { pricingVersion: 'it-cached@2026-11-03T15:00:00Z', reservedMicroUsd: 2_000 } });
+      expect(priceQueries()).toBe(1);
+      clock = new Date('2026-11-03T15:03:00.000Z');
+      await m.authorize(unitsAsk('it-cached'));
+      expect(priceQueries()).toBe(2);
+    });
+
+    test('no version yet is not cached: a version synced a minute later is found', async () => {
+      const { client, priceQueries } = counting();
+      const m = meter({}, client);
+      expect(await m.authorize(unitsAsk('it-late'))).toMatchObject({ ok: false, body: { error: 'pricing_not_configured' } });
+      await putVersion('it-late', '2026-11-03T00:00:00Z', 1_000_000);
+      clock = new Date(clock.getTime() + 60_000);
+      expect(await m.authorize(unitsAsk('it-late'))).toMatchObject({ ok: true });
+      expect(priceQueries()).toBe(2);
+    });
   });
 
   describe('usage(person)', () => {

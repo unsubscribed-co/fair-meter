@@ -43,6 +43,9 @@ try {
 - `max` must bound the real usage: the cap is only as good as it. Tokens: `inputTokens` = the UTF-8 bytes of everything sent (text tokens are never fewer than bytes), `outputTokens` = the `max_tokens` sent. **The bytes bound fails for images and files sent by URL or file id** (a 100-byte URL can cost thousands of tokens): add the provider's token count for each such part. `{ chars }`, `{ units }` or `{ requests }` for other prices;
 - a malformed request (from untyped JavaScript) is refused with 500 `metering_unavailable` and alarms; `authorize` never throws;
 - returns `{ ok: true, tier, callId, hold }` (one fresh `callId` per attempt), or `{ ok: false, status, body, headers }`: `daily_limit_reached` (429, `resetsAt`), `too_many_requests` (429, `Retry-After`), `service_paused`, `pricing_not_configured`, `metering_unavailable` (503).
+- logs one info line per call, refusals included: `AUTHORIZE_TIMING` `{ appId, sku, outcome, readsMs, reserveMs, totalMs, attempts }` (`outcome` is `ok` or the refusal code; `readsMs` the parallel reads, `reserveMs` the reserve transaction with its resends, `attempts` how many times it was sent, 0 when refused before it).
+
+Each `FairMeter` caches a SKU's price versions for 5 minutes and picks the one valid at the call's time from them, so a warm instance doesn't query prices on every call. A SKU with no version isn't cached: one synced later is found on the next call.
 
 **`record(call, usage)`**, after the attempt, whatever happened. Settles the reservation exactly once:
 
@@ -94,7 +97,7 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts sync --table <ledger table> [-
 npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <name> [--keys pk,sk]
 ```
 
-`sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
+`sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. A new version must start at least 10 minutes after `sync` runs (twice the 5-minute price cache, so no warm instance prices a call at the old version after the change); a SKU with no stored version may start at once. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
 
 **Action SKUs** are ordinary price files, `prices/<app>-<action>.json`, with `provider: "aws"` and `unit: "units"` (one unit is one action). Each version has `microUsdPerKUnits` and `components: { database, api, compute, logs, other }`, integer micro-USD per 1,000 actions; the parser requires exactly those five and their sum equal to `microUsdPerKUnits`, and `source` is the AWS Price List URL. They sync and price like any `units` SKU, and `price-history` shows the components. None is seeded yet: the first ones come from a measurement.
 

@@ -120,6 +120,9 @@ export function feeAt(at: Date, fee = parseFeeFile(readFileSync(path.join(PRICES
   return version;
 }
 
+/** A new version's least lead time: twice FairMeter's 5-minute price cache. */
+const MIN_LEAD_MS = 10 * 60_000;
+
 // ---------------------------------------------------------------------------------------------
 // The price list: an app's measured usage per action times AWS's public Price List, plus the fee.
 
@@ -338,7 +341,7 @@ export function formatPriceList(l: PriceList): string {
  */
 export function writePriceList(dir: string, list: PriceList, validFrom: string, now: Date): string[] {
   // Instances cache price versions for 5 minutes: a version must not start inside that window.
-  if (validFrom < pricingTime(new Date(now.getTime() + 10 * 60_000))) throw new Error(`--valid-from ${validFrom} must be at least 10 minutes ahead`);
+  if (validFrom < pricingTime(new Date(now.getTime() + MIN_LEAD_MS))) throw new Error(`--valid-from ${validFrom} must be at least 10 minutes ahead`);
   const writes: [string, string][] = [];
   const lines: string[] = [];
   for (const a of list.actions) {
@@ -412,6 +415,9 @@ export async function syncPrices(ddb: DynamoDBDocumentClient, table: string, fil
       }
       try {
         const { closePrevious } = planNewVersion(latest, v.validFrom, now, backdate);
+        if (!backdate && v.validFrom < pricingTime(new Date(now.getTime() + MIN_LEAD_MS))) {
+          throw new Error(`starts less than 10 minutes after now (${pricingTime(now)}): FairMeter caches prices for 5 minutes, so a warm instance could still price calls at the old version`);
+        }
         writes.push({ label, item, ...(closePrevious ? { close: { sk: closePrevious.sk, validTo: closePrevious.validTo } } : {}) });
         latest = { [tableKeys().sk]: v.validFrom, ...item };
       } catch (err) {
