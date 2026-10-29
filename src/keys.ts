@@ -20,6 +20,7 @@
  *                                                     when it is settled (EVENT put in the same transaction) or released
  *   REDRIVE#<app>     CALL#<callId>                   redrives: times the nightly redrive put this call's record back
  *                                                     on the retry queue (at most 3); expiresAt (TTL, 30 days)
+ *   ROLLUP#<app>      CURSOR                          the action rollup: lastWindowStart, the last 15-minute window settled
  *   PRICING#<sku>     <validFrom>                     price versions, shared by all apps
  *   PLANDEF#<app>#<plan> <validFrom>                  plan definition versions (what a plan includes per budget mode),
  *                                                     immutable like prices: validFrom, validTo, grid (the app's own shape)
@@ -126,6 +127,8 @@ export const keys = {
   pending: (appId: string, callId: string) => key(`PENDING#${appId}`, `CALL#${callId}`),
   /** How many times the nightly redrive has put this call's record back on the retry queue. */
   redrive: (appId: string, callId: string) => key(`REDRIVE#${appId}`, `CALL#${callId}`),
+  /** The action rollup's cursor: the last window whose every record was written. */
+  rollupCursor: (appId: string) => key(`ROLLUP#${appId}`, 'CURSOR'),
   /**
    * One immutable version of a plan's definition for one app, valid in [validFrom, validTo) like a
    * price version (validFrom = SK, canonical UTC to the second). Version id: `<plan>@<SK>`.

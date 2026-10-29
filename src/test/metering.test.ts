@@ -229,6 +229,46 @@ describe('actions: the floor and the write check', () => {
     expect(JSON.stringify(env(t, s))).not.toContain('action');
   });
 
+  describe('the rollup', () => {
+    const rollupOf = (t: Template) => Object.entries(t.findResources('AWS::Lambda::Function')).find(([id]) => id.startsWith('MeteringRollup'));
+    const statements = (t: Template) => Object.entries(t.findResources('AWS::IAM::Policy')).find(([id]) => id.startsWith('MeteringRollupServiceRoleDefaultPolicy'))![1].Properties.PolicyDocument.Statement;
+    const on = (t: Template, action: string) => statements(t).filter((st: any) => [st.Action].flat().includes(action)).map((st: any) => st.Resource);
+
+    test('only with actions', () => {
+      const { t } = synth();
+      expect(rollupOf(t)).toBeUndefined();
+      expect(JSON.stringify(t.toJSON())).not.toContain('logs:StartQuery');
+    });
+
+    test('on the quarter hours (a rate can drift to 45 minutes), 5 minutes, ARM, 256 MB, the config and the granted log groups', () => {
+      const { t, s } = synth({ actions: { skus } });
+      const [id, fn] = rollupOf(t)!;
+      expect(fn.Properties).toMatchObject({ Timeout: 300, MemorySize: 256, Architectures: ['arm64'], Runtime: 'nodejs24.x' });
+      expect(fn.Properties.Environment.Variables.FAIR_METER).toBeDefined();
+      expect(JSON.stringify(s.resolve(fn.Properties.Environment.Variables.LOG_GROUPS))).toMatch(/^\{"Ref":"ApiLogs\w+"\}$/);
+      t.hasResourceProperties('AWS::Events::Rule', { ScheduleExpression: 'cron(0/15 * * * ? *)', Targets: [Match.objectLike({ Arn: { 'Fn::GetAtt': [id, 'Arn'] } })] });
+    });
+
+    test('may query the granted functions\' log groups and write the ledger table only', () => {
+      const { t } = synth({ actions: { skus } });
+      expect(JSON.stringify(on(t, 'logs:StartQuery'))).toMatch(/^\[\{"Fn::GetAtt":\["ApiLogs\w+","Arn"\]\}\]$/);
+      // GetQueryResults takes no resource: a query id is only known to whoever started it.
+      expect(on(t, 'logs:GetQueryResults')).toEqual(['*']);
+      const dynamo = statements(t).filter((st: any) => [st.Action].flat().some((a: string) => a.startsWith('dynamodb:')));
+      expect(dynamo).toHaveLength(1);
+      expect([dynamo[0].Action].flat().sort()).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:UpdateItem']);
+      expect(JSON.stringify(dynamo[0].Resource)).toMatch(/^\[\{"Fn::GetAtt":\["MeteringLedger\w+","Arn"\]\}/);
+    });
+
+    test('its terms join the metering error alarm, fed by its own log group too; a failed or timed-out run alarms', () => {
+      const { t } = synth({ actions: { skus } });
+      const pattern = Match.stringLikeRegexp('ACTION_UNPRICED.*ROLLUP_TRUNCATED.*ROLLUP_FAILED.*ROLLUP_LATE');
+      t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: pattern, LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') } });
+      t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: pattern, LogGroupName: { Ref: Match.stringLikeRegexp('^MeteringRollupLogs') }, MetricTransformations: [Match.objectLike({ MetricName: 'stacksplit-prod-MeteringErrors' })] });
+      t.hasResourceProperties('AWS::CloudWatch::Alarm', { MetricName: 'Errors', Dimensions: [{ Name: 'FunctionName', Value: { Ref: rollupOf(t)![0] } }], Threshold: 1, AlarmActions: Match.anyValue() });
+    });
+  });
+
   test('ACTION_UNKNOWN joins the metering error terms', () => {
     synth().t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: Match.stringLikeRegexp('ACTION_UNKNOWN'), LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') } });
   });
