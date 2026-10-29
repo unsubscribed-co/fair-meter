@@ -5,7 +5,7 @@ import { ACTION_LAG_MS } from './actions';
 import type { FairMeterConfig } from './fair-meter';
 import { keys, pkNotExists, setTableKeys, skOf, tableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
-import { priceCall, pricingTime, versionCovers } from './pricing';
+import { priceCall, versionStartedBy, versionCovers } from './pricing';
 
 /*
  * The action rollup: every 15 minutes, one Logs Insights query per fixed 15-minute UTC window that
@@ -140,7 +140,7 @@ async function priceAt(ddb: DynamoDBDocumentClient, table: string, cache: Map<st
     versions = Items;
     cache.set(sku, versions);
   }
-  const item = versions.filter((v) => skOf(v) <= pricingTime(at)).at(-1);
+  const item = versionStartedBy(versions, at, skOf);
   return item && versionCovers(item, at) ? { version: `${sku}@${skOf(item)}`, item } : undefined;
 }
 

@@ -4,7 +4,7 @@ import { settlementRecord, type AttemptUsage, type CallRequest, type FairMeterAp
 import { nextUtcDay, nextUtcMonth, utcDay, utcMinute, utcMonth } from './keys';
 import { absorbedOf } from './ledger';
 import { loadPriceFiles, type PriceFile } from './prices';
-import { pricingTime, reserveCost } from './pricing';
+import { reserveCost, versionStartedBy } from './pricing';
 
 /*
  * fair-meter/testing: FairMeter in memory, for an app's own tests (no DynamoDB, no SDK mocks).
@@ -71,7 +71,7 @@ export class FakeFairMeter implements FairMeterApi {
     const forced = this.takeForced(at, this.tier(day.committed));
     if (forced) return forced;
     const file = this.prices.find((f) => f.sku === req.sku);
-    const version = file?.versions.filter((v) => v.validFrom <= pricingTime(at)).at(-1);
+    const version = file && versionStartedBy(file.versions, at);
     if (!file || !version) return refusal('pricing_not_configured', at);
     const price = { provider: file.provider, ...version };
     const reserved = reserveCost(price, req.max, at);

@@ -256,6 +256,15 @@ export function validFromOf(item: StoredVersion): string {
   return CANONICAL.test(sk) ? sk : `${sk}T00:00:00Z`;
 }
 
+/**
+ * Of `versions` (oldest first), the one valid at `at`: the last that starts at or before it. Price
+ * and fee files start a version at `validFrom`; PRICING items pass their sort key (`skOf`).
+ */
+export function versionStartedBy<T>(versions: readonly T[], at: Date, startOf: (v: T) => string = (v) => (v as { validFrom: string }).validFrom): T | undefined {
+  const t = pricingTime(at);
+  return versions.filter((v) => startOf(v) <= t).at(-1);
+}
+
 /** True when `at` falls inside the version's [validFrom, validTo) range. */
 export function versionCovers(item: StoredVersion, at: Date): boolean {
   const t = pricingTime(at);

@@ -8,7 +8,7 @@ import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, setTableKeys,
 import { recordUsage, type UsageRecord } from './ledger';
 import { takeCapacity } from './measure';
 import { Meter } from './meter';
-import { priceCall, priceShape, pricingTime, reserveCost, versionCovers, type CallUsage, type PriceShape } from './pricing';
+import { priceCall, priceShape, reserveCost, versionStartedBy, versionCovers, type CallUsage, type PriceShape } from './pricing';
 import { canonicalMeters, isProvider, metersFromUsage, type Provider } from './usage';
 
 /*
@@ -530,8 +530,7 @@ export class FairMeter {
       cached = { readAt: at.getTime(), versions: Items };
       if (Items.length) this.prices.set(sku, cached);
     }
-    const t = pricingTime(at);
-    const item = cached.versions.filter((v) => skOf(v) <= t).at(-1);
+    const item = versionStartedBy(cached.versions, at, skOf);
     if (!item) return undefined;
     const version = `${sku}@${skOf(item)}`;
     if (!versionCovers(item, at)) {

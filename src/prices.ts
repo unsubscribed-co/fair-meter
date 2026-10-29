@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { METER_NAMES, type Meters } from './cost';
-import { parseValidFrom, priceShape, pricingTime, type PriceShape } from './pricing';
+import { parseValidFrom, priceShape, pricingTime, versionStartedBy, type PriceShape } from './pricing';
 import { isProvider } from './usage';
 
 /*
@@ -100,9 +100,8 @@ export function parseFeeFile(text: string): FeeFile {
 
 /** The fee version valid at `at`. */
 export function feeAt(at: Date, fee = parseFeeFile(readFileSync(path.join(PRICES_DIR, FEE_FILE), 'utf8'))): FeeFile['versions'][number] {
-  const t = pricingTime(at);
-  const version = [...fee.versions].reverse().find((v) => v.validFrom <= t);
-  if (!version) throw new Error(`prices/${FEE_FILE}: no fee version at ${t}`);
+  const version = versionStartedBy(fee.versions, at);
+  if (!version) throw new Error(`prices/${FEE_FILE}: no fee version at ${pricingTime(at)}`);
   return version;
 }
 

@@ -6,7 +6,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { computeUnitCost, formatUsd, METER_NAMES, type Meters } from './cost';
 import { setTableKeys, skOf, tableKeys } from './keys';
-import { parseValidFrom, planNewVersion, priceCall, pricingTime, versionRanges } from './pricing';
+import { parseValidFrom, planNewVersion, priceCall, pricingTime, versionStartedBy, versionRanges } from './pricing';
 import { COMPONENTS, feeAt, loadPriceFiles, parseAppFile, parsePriceFile, PRICES_DIR, PROFILES, type AppFile, type PriceFile } from './prices';
 import { checkAppId, parseFlags } from './report';
 
@@ -158,7 +158,8 @@ export function priceList(app: string, file: AppFile, rates: Rates, skus: PriceF
   const profiles = Object.fromEntries(PROFILES.map((name) => {
     const p = file.profiles[name];
     const ai = Object.entries(p.ai).map(([sku, call]) => {
-      const version = skus.find((f) => f.sku === sku)?.versions.filter((v) => v.validFrom <= t).at(-1);
+      const file = skus.find((f) => f.sku === sku);
+      const version = file && versionStartedBy(file.versions, now);
       if (!version) throw new Error(`profiles.${name}.ai.${sku}: no price version at ${t}`);
       const meters = Object.fromEntries(METER_NAMES.map((k) => [k, call.meters[k] ?? 0])) as unknown as Meters;
       const priced = priceCall(version, { meters }, now);
