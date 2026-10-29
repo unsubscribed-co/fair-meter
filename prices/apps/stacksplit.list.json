@@ -1,0 +1,85 @@
+{
+  "validFrom": "2026-10-29T21:30:00Z",
+  "app": "stacksplit",
+  "region": "us-east-2",
+  "at": "2026-10-29T21:05:19Z",
+  "feeBps": 10000,
+  "rates": {
+    "readRequestUnit": "0.0000001250",
+    "writeRequestUnit": "0.0000006250",
+    "armRequest": "0.0000002000",
+    "armGbSecond": "0.0000133334",
+    "httpApiRequest": "0.0000010000",
+    "logIngestedGb": "0.5000000000",
+    "logScannedGb": "0.0050000000"
+  },
+  "actions": [
+    {
+      "sku": "stacksplit-new-expense",
+      "components": {
+        "database": 6855,
+        "api": 1000,
+        "compute": 826,
+        "logs": 193,
+        "other": 0
+      },
+      "costMicroUsdPerK": 8874,
+      "feeMicroUsdPerK": 8874,
+      "priceMicroUsdPerK": 17748
+    },
+    {
+      "sku": "stacksplit-change-expense",
+      "components": {
+        "database": 6141,
+        "api": 1000,
+        "compute": 921,
+        "logs": 195,
+        "other": 0
+      },
+      "costMicroUsdPerK": 8257,
+      "feeMicroUsdPerK": 8257,
+      "priceMicroUsdPerK": 16514
+    }
+  ],
+  "profiles": {
+    "light": {
+      "ai": [
+        {
+          "sku": "claude-haiku-5-5",
+          "callsPerDay": 1,
+          "costMicroUsdPerCall": 598
+        }
+      ],
+      "dailyCostMicroUsd": 686,
+      "monthlyCostMicroUsd": 20580,
+      "monthlyPriceMicroUsd": 41160,
+      "daysFor2Usd": 1457
+    },
+    "regular": {
+      "ai": [
+        {
+          "sku": "claude-haiku-5-5",
+          "callsPerDay": 5,
+          "costMicroUsdPerCall": 598
+        }
+      ],
+      "dailyCostMicroUsd": 3425,
+      "monthlyCostMicroUsd": 102750,
+      "monthlyPriceMicroUsd": 205500,
+      "daysFor2Usd": 291
+    },
+    "heavy": {
+      "ai": [
+        {
+          "sku": "claude-haiku-5-5",
+          "callsPerDay": 20,
+          "costMicroUsdPerCall": 598
+        }
+      ],
+      "dailyCostMicroUsd": 13699,
+      "monthlyCostMicroUsd": 410970,
+      "monthlyPriceMicroUsd": 821940,
+      "daysFor2Usd": 72
+    }
+  }
+}

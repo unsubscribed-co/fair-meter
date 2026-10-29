@@ -14,7 +14,7 @@ const actionSku = (sku: string, ...perK: number[]) => ({
 });
 jest.mock('../prices', () => {
   const actual = jest.requireActual('../prices');
-  return { ...actual, loadPriceFiles: () => [...actual.loadPriceFiles(), actionSku('stacksplit-new-expense', 1_000, 4_200), actionSku('stacksplit-edit-expense', 3_000)] };
+  return { ...actual, loadPriceFiles: () => [...actual.loadPriceFiles().filter((f: { sku: string }) => !f.sku.startsWith('stacksplit-')), actionSku('stacksplit-new-expense', 1_000, 4_200), actionSku('stacksplit-edit-expense', 3_000)] };
 });
 
 const alarmAction = { bind: () => ({ alarmActionArn: 'arn:aws:sns:us-east-2:111111111111:a' }) } as cloudwatch.IAlarmAction;

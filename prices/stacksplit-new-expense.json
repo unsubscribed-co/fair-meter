@@ -1,0 +1,18 @@
+{
+  "provider": "aws",
+  "unit": "units",
+  "versions": [
+    {
+      "validFrom": "2026-10-29T21:30:00Z",
+      "microUsdPerKUnits": 8874,
+      "components": {
+        "database": 6855,
+        "api": 1000,
+        "compute": 826,
+        "logs": 193,
+        "other": 0
+      },
+      "source": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/index.json"
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "region": "us-east-2",
+  "actions": {
+    "stacksplit-new-expense": {
+      "rru": 4.334,
+      "wru": 10,
+      "apiRequests": 1,
+      "lambdaRequests": 1,
+      "billedMs": 187.667,
+      "memoryMb": 256,
+      "logBytes": 409,
+      "samples": 12,
+      "measuredAt": "2026-10-29T21:04:57Z"
+    },
+    "stacksplit-change-expense": {
+      "rru": 3.625,
+      "wru": 9,
+      "apiRequests": 1,
+      "lambdaRequests": 1,
+      "billedMs": 216.084,
+      "memoryMb": 256,
+      "logBytes": 412.542,
+      "samples": 48,
+      "measuredAt": "2026-10-29T21:04:57Z"
+    }
+  },
+  "profiles": {
+    "light": {
+      "actions": {
+        "stacksplit-new-expense": 7,
+        "stacksplit-change-expense": 3
+      },
+      "ai": {
+        "claude-haiku-5-5": {
+          "callsPerDay": 1,
+          "meters": {
+            "inputTokens": 2591,
+            "cacheReadTokens": 3267,
+            "outputTokens": 612
+          }
+        }
+      }
+    },
+    "regular": {
+      "actions": {
+        "stacksplit-new-expense": 35,
+        "stacksplit-change-expense": 15
+      },
+      "ai": {
+        "claude-haiku-5-5": {
+          "callsPerDay": 5,
+          "meters": {
+            "inputTokens": 2591,
+            "cacheReadTokens": 3267,
+            "outputTokens": 612
+          }
+        }
+      }
+    },
+    "heavy": {
+      "actions": {
+        "stacksplit-new-expense": 140,
+        "stacksplit-change-expense": 60
+      },
+      "ai": {
+        "claude-haiku-5-5": {
+          "callsPerDay": 20,
+          "meters": {
+            "inputTokens": 2591,
+            "cacheReadTokens": 3267,
+            "outputTokens": 612
+          }
+        }
+      }
+    }
+  }
+}

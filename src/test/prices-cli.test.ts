@@ -36,7 +36,7 @@ afterEach(() => jest.restoreAllMocks());
 describe('the price files in prices/', () => {
   test('every file parses: one SKU each, rates in the unit it names, a source for every version', () => {
     const files = loadPriceFiles();
-    expect(files.map((f) => f.sku).sort()).toEqual(['claude-haiku-5-5', 'deepseek-v4-flash']);
+    expect(files.map((f) => f.sku).sort()).toEqual(['claude-haiku-5-5', 'deepseek-v4-flash', 'stacksplit-change-expense', 'stacksplit-new-expense']);
     for (const f of files) for (const v of f.versions) expect(priceShape({ provider: f.provider, ...v })).toBe(f.unit);
   });
 

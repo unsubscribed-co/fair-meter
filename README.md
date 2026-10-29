@@ -9,7 +9,7 @@ Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): ev
 TypeScript source, no build step: your bundler (esbuild via CDK's `NodejsFunction`) compiles it with your code.
 
 ```
-npm install github:unsubscribed-co/fair-meter#v0.3.0
+npm install github:unsubscribed-co/fair-meter#v0.3.1
 ```
 
 - `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/testing` has the test double (`FakeFairMeter`, see "Testing your metering code"); `fair-meter/<file>` reaches one file.
@@ -112,7 +112,7 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <n
 
 `sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. A new version must start at least 10 minutes after `sync` runs (twice the 5-minute price cache, so no warm instance prices a call at the old version after the change); a SKU with no stored version may start at once. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
 
-**Action SKUs** are ordinary price files, `prices/<app>-<action>.json`, with `provider: "aws"` and `unit: "units"` (one unit is one action). Each version has `microUsdPerKUnits` and `components: { database, api, compute, logs, other }`, integer micro-USD per 1,000 actions; the parser requires exactly those five and their sum equal to `microUsdPerKUnits`, and `source` is the AWS Price List URL. They sync and price like any `units` SKU, and `price-history` shows the components. None is seeded yet: the first ones come from a measurement.
+**Action SKUs** are ordinary price files, `prices/<app>-<action>.json`, with `provider: "aws"` and `unit: "units"` (one unit is one action). Each version has `microUsdPerKUnits` and `components: { database, api, compute, logs, other }`, integer micro-USD per 1,000 actions; the parser requires exactly those five and their sum equal to `microUsdPerKUnits`, and `source` is the AWS Price List URL. They sync and price like any `units` SKU, and `price-history` shows the components. StackSplit's (`stacksplit-new-expense`, `stacksplit-change-expense`) come from its dev measurement, `prices/apps/stacksplit.json`, with the published list in `prices/apps/stacksplit.list.json`.
 
 **The fee** has one home, `prices/fee.json`: `{ "versions": [{ "validFrom", "feeBps" }] }`, in basis points of cost, versioned like a price (today 10000, 100% of cost, from 2026-10-29). `billing: 'none'` means no fee: v0.3.0 never applies it, and `'hosted'` (which will) is refused until the wallet exists. `sync` skips `fee.json` and `prices/apps/`.
 
