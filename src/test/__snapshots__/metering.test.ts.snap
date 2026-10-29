@@ -121,7 +121,7 @@ exports[`MeteringRetry with an alarmAction: v0.2.0's template (Nieto's construct
           "S3Bucket": {
             "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
           },
-          "S3Key": "b68d1b4be837b62838e85f6121f567a14fead92d2d7916478606e09f83dad784.zip",
+          "S3Key": "<asset>.zip",
         },
         "Environment": {
           "Variables": {

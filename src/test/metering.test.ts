@@ -132,7 +132,9 @@ test("MeteringRetry with an alarmAction: v0.2.0's template (Nieto's construct)",
   const s = new cdk.Stack(app, 'S');
   const table = new dynamodb.Table(s, 'T', { partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING } });
   new MeteringRetry(s, 'Retry', { table, alarmAction });
-  expect(Template.fromStack(s).toJSON()).toMatchSnapshot();
+  // The code asset's hash changes with any source edit; the template's shape is what's pinned.
+  const json = JSON.stringify(Template.fromStack(s).toJSON()).replace(/"[0-9a-f]{64}\.zip"/g, '"<asset>.zip"');
+  expect(JSON.parse(json)).toMatchSnapshot();
 });
 
 test('MeteringRetry without an alarmAction: both DLQ alarms, no action', () => {
