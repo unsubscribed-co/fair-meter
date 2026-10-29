@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { DeleteMessageCommand, ReceiveMessageCommand, SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
-import { keys } from './keys';
+import { conditionFailed, keys } from './keys';
 import { recordable } from './retry-handler';
 
 /**
@@ -44,7 +44,7 @@ export async function redrive(
           ExpressionAttributeValues: { ':one': 1, ':max': MAX_REDRIVES, ':exp': Math.floor(now.getTime() / 1000) + COUNT_DAYS * 86_400 },
         }));
       } catch (err) {
-        if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+        if (conditionFailed(err)) {
           console.warn('REDRIVE_LIMIT', { ...facts, redrives: MAX_REDRIVES });
           result.limited++;
         } else {

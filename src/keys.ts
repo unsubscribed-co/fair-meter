@@ -96,6 +96,8 @@ export function subOf(item: Record<string, any>): string {
 /** Conditions on the table's partition key: `attribute_exists(PK)` / `attribute_not_exists(PK)` by default. */
 export const pkExists = () => `attribute_exists(${tableKeys().pk})`;
 export const pkNotExists = () => `attribute_not_exists(${tableKeys().pk})`;
+/** A single write refused by its ConditionExpression (not a transaction's cancellation). */
+export const conditionFailed = (err: unknown) => (err as { name?: string } | undefined)?.name === 'ConditionalCheckFailedException';
 
 export const keys = {
   profile: (sub: string) => key(userPk(sub), 'PROFILE'),

@@ -3,7 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ACTION_LAG_MS } from './actions';
 import type { FairMeterConfig } from './fair-meter';
-import { keys, pkNotExists, setTableKeys, skOf, tableKeys } from './keys';
+import { conditionFailed, keys, pkNotExists, setTableKeys, skOf, tableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
 import { QUERY_ROW_LIMIT, runQuery } from './logs-insights';
 import { priceCall, versionStartedBy, versionCovers } from './pricing';
@@ -44,7 +44,7 @@ export async function rollup(
       // No backfill before the deploy: the current window is the first one settled.
       const lastWindowStart = new Date(Math.floor(now.getTime() / WINDOW_MS) * WINDOW_MS - WINDOW_MS).toISOString();
       await ddb.send(new PutCommand({ TableName: cfg.tableName, Item: { ...key, lastWindowStart }, ConditionExpression: pkNotExists() }))
-        .catch((err) => { if (err?.name !== 'ConditionalCheckFailedException') throw err; });
+        .catch((err) => { if (!conditionFailed(err)) throw err; });
       return done;
     }
     let start = Date.parse(Item.lastWindowStart) + WINDOW_MS;
@@ -103,7 +103,7 @@ export async function rollup(
         // An overlapping run that got further keeps its cursor.
         ConditionExpression: 'lastWindowStart < :w',
         ExpressionAttributeValues: { ':w': windowStart },
-      })).catch((err) => { if (err?.name !== 'ConditionalCheckFailedException') throw err; });
+      })).catch((err) => { if (!conditionFailed(err)) throw err; });
       done.windows++;
     }
     return done;
