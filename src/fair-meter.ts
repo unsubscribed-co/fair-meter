@@ -2,9 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import { assertTierThresholds, budgetTier, DEFAULT_TIER_THRESHOLDS, type BudgetTier, type TierThresholds } from './budget';
+import { pastFloor } from './actions';
+import { assertTierThresholds, dayTier, type BudgetTier, type TierThresholds } from './budget';
 import type { Meters } from './cost';
-import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, setTableKeys, skOf, tableKeys, utcDay, utcMinute, utcMonth, type TableKeys } from './keys';
+import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, secondsToNextUtcMinute, setTableKeys, skOf, tableKeys, utcDay, utcMinute, utcMonth, type TableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
 import { takeCapacity } from './measure';
 import { Meter } from './meter';
@@ -44,9 +45,18 @@ export interface FairMeterConfig {
   /** The table's key names when they aren't PK/SK (StackSplit: pk/sk). */
   tableKeys?: Partial<TableKeys>;
   /** The app's action SKUs and the limits the floor is computed from (Metering's `actions`). Absent: no actions. */
-  actions?: { skus: string[]; perPersonPerMinute: number; maxConcurrency: number };
+  actions?: Actions;
   /** The floor, computed at synth (micro-USD): the room under the daily cap that AI holds can't use. Required with `actions`. */
   actionFloorMicroUsd?: number;
+}
+
+/** An app's actions: its action SKUs and the limits the floor is computed from. */
+export interface Actions {
+  skus: string[];
+  /** Per person, per function instance, per UTC minute. */
+  perPersonPerMinute: number;
+  /** The most instances of the granted functions that can run at once. */
+  maxConcurrency: number;
 }
 
 export type Max = { inputTokens: number; outputTokens: number } | { chars: number } | { units: number } | { requests: number };
@@ -259,7 +269,7 @@ export class FairMeter {
 
     const committed = Number(userDay?.committedMicroUsd ?? 0);
     const cap = this.cfg.dailyCapMicroUsd;
-    const tierAt = (used: number) => budgetTier([{ usedMicroUsd: used, capMicroUsd: cap }], this.cfg.tiers ?? DEFAULT_TIER_THRESHOLDS);
+    const tierAt = (used: number) => dayTier(used, cap, this.cfg.tiers);
     const tier = tierAt(committed);
     const appSpent = Number(appDay?.costMicroUsd ?? 0);
     const allSpent = Number(allAppsDay?.costMicroUsd ?? 0);
@@ -281,7 +291,7 @@ export class FairMeter {
       console.error('CALL_EXCEEDS_CAP', { ...log, reservedMicroUsd: reserved, dailyCapMicroUsd: cap, ...(this.floor ? { actionFloorMicroUsd: this.floor } : {}) });
       return refuse(429, 'daily_limit_reached', { resetsAt: nextUtcDay(at) }, tier);
     }
-    if (committed + reserved > limit) return this.limitReached(log, at, tier);
+    if (pastFloor(committed + reserved, cap, this.floor)) return this.limitReached(log, at, tier);
     if (retryAfterSeconds !== undefined) {
       console.warn('RATE_LIMITED', { ...log, maxCallsPerMinute: this.cfg.maxCallsPerMinute });
       return { ok: false, status: 429, body: { error: 'too_many_requests', retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) }, tier };
@@ -435,8 +445,8 @@ export class FairMeter {
         resetsAt: nextUtcDay(at),
       },
       month: { spentMicroUsd: spent(month), resetsAt: nextUtcMonth(at) },
-      tier: budgetTier([{ usedMicroUsd: committed, capMicroUsd: cap }], this.cfg.tiers ?? DEFAULT_TIER_THRESHOLDS),
-      readOnly: this.cfg.actions !== undefined && committed > cap - this.floor,
+      tier: dayTier(committed, cap, this.cfg.tiers),
+      readOnly: this.cfg.actions !== undefined && pastFloor(committed, cap, this.floor),
     };
   }
 
@@ -481,15 +491,14 @@ export class FairMeter {
       const at = this.now();
       // Bounds what one instance lets a person do within one rollup lag: the floor's premise.
       if ((this.actionsThisMinute().get(person) ?? 0) + n > a!.perPersonPerMinute) {
-        const retryAfterSeconds = Math.max(1, Math.ceil((Math.floor(at.getTime() / 60_000) * 60_000 + 60_000 - at.getTime()) / 1000));
+        const retryAfterSeconds = secondsToNextUtcMinute(at);
         console.warn('RATE_LIMITED', { ...log, perPersonPerMinute: a!.perPersonPerMinute });
         return { ok: false, status: 429, body: { error: 'too_many_requests', retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) } };
       }
       const { Item } = await this.ddb.send(new GetCommand({ TableName: this.cfg.tableName, Key: keys.userDay(person, this.cfg.appId, utcDay(at)) }));
       const committed = Number(Item?.committedMicroUsd ?? 0);
-      if (committed <= this.cfg.dailyCapMicroUsd - this.floor) return { ok: true };
-      const tier = budgetTier([{ usedMicroUsd: committed, capMicroUsd: this.cfg.dailyCapMicroUsd }], this.cfg.tiers ?? DEFAULT_TIER_THRESHOLDS);
-      return this.limitReached(log, at, tier);
+      if (!pastFloor(committed, this.cfg.dailyCapMicroUsd, this.floor)) return { ok: true };
+      return this.limitReached(log, at, dayTier(committed, this.cfg.dailyCapMicroUsd, this.cfg.tiers));
     } catch (err) {
       console.error('METER_UNAVAILABLE', { ...log, err });
       return refuse(503, 'metering_unavailable');

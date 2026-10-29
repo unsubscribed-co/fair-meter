@@ -166,5 +166,7 @@ export function parseCounterSk(sk: string, legacyAppId: string): { kind: string;
 export const utcDay = (at: Date) => at.toISOString().slice(0, 10);
 export const utcMonth = (at: Date) => at.toISOString().slice(0, 7);
 export const utcMinute = (at: Date) => at.toISOString().slice(0, 16);
+/** Retry-After for a per-minute limit: whole seconds until the next UTC minute, at least 1. */
+export const secondsToNextUtcMinute = (at: Date) => Math.max(1, Math.ceil((Math.floor(at.getTime() / 60_000) * 60_000 + 60_000 - at.getTime()) / 1000));
 export const nextUtcDay = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString();
 export const nextUtcMonth = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString();

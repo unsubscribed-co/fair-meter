@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { budgetTier, DEFAULT_TIER_THRESHOLDS, type TierThresholds } from './budget';
-import { settlementRecord, type AttemptUsage, type CallRequest, type FairMeterApi, type FairMeterConfig, type Hold, type PersonUsage, type RecordOutcome, type Refusal, type RefusalCode, type Reservation } from './fair-meter';
-import { nextUtcDay, nextUtcMonth, utcDay, utcMinute, utcMonth } from './keys';
+import { pastFloor } from './actions';
+import { dayTier, type TierThresholds } from './budget';
+import { settlementRecord, type Actions, type AttemptUsage, type CallRequest, type FairMeterApi, type Hold, type PersonUsage, type RecordOutcome, type Refusal, type RefusalCode, type Reservation } from './fair-meter';
+import { nextUtcDay, nextUtcMonth, secondsToNextUtcMinute, utcDay, utcMinute, utcMonth } from './keys';
 import { absorbedOf } from './ledger';
 import { loadPriceFiles, type PriceFile } from './prices';
 import { reserveCost, versionStartedBy } from './pricing';
@@ -16,7 +17,7 @@ export interface FakeFairMeterOptions {
   /** Default 500,000 ($0.50). */
   dailyCapMicroUsd?: number;
   /** As Metering's `actions`. Absent: no actions, and canWrite refuses like FairMeter. */
-  actions?: FairMeterConfig['actions'];
+  actions?: Actions;
   /** The floor Metering computes at synth; default 0. */
   actionFloorMicroUsd?: number;
   tiers?: TierThresholds;
@@ -77,7 +78,7 @@ export class FakeFairMeter implements FairMeterApi {
     const reserved = reserveCost(price, req.max, at);
     if (reserved === undefined) return refusal('metering_unavailable', at);
     // AI holds stop at cap - floor, as in FairMeter.
-    if (day.committed + reserved > this.cap - this.floor) return refusal('daily_limit_reached', at, this.tier(day.committed));
+    if (pastFloor(day.committed + reserved, this.cap, this.floor)) return refusal('daily_limit_reached', at, this.tier(day.committed));
     const callId = randomUUID();
     const hold: Hold = {
       person: req.person, at: at.toISOString(), sku: req.sku, provider: file.provider, pricingVersion: `${req.sku}@${version.validFrom}`,
@@ -134,7 +135,7 @@ export class FakeFairMeter implements FairMeterApi {
       },
       month: { spentMicroUsd: month.cost - month.absorbed, resetsAt: nextUtcMonth(at) },
       tier: this.tier(day.committed),
-      readOnly: this.options.actions !== undefined && day.committed > this.cap - this.floor,
+      readOnly: this.options.actions !== undefined && pastFloor(day.committed, this.cap, this.floor),
     };
   }
 
@@ -159,7 +160,7 @@ export class FakeFairMeter implements FairMeterApi {
     const a = this.options.actions;
     if (!a || typeof person !== 'string' || !person || !Number.isInteger(n) || n < 1 || n > a.perPersonPerMinute) return { ...refusal('metering_unavailable', at), status: 500 };
     if ((this.actionsThisMinute().get(person) ?? 0) + n > a.perPersonPerMinute) return refusal('too_many_requests', at);
-    return committed <= this.cap - this.floor ? { ok: true } : refusal('daily_limit_reached', at, this.tier(committed));
+    return !pastFloor(committed, this.cap, this.floor) ? { ok: true } : refusal('daily_limit_reached', at, this.tier(committed));
   }
 
   private takeForced(at: Date, tier: Refusal['tier']): Refusal | undefined {
@@ -169,7 +170,7 @@ export class FakeFairMeter implements FairMeterApi {
   }
 
   private tier(committed: number) {
-    return budgetTier([{ usedMicroUsd: committed, capMicroUsd: this.cap }], this.options.tiers ?? DEFAULT_TIER_THRESHOLDS);
+    return dayTier(committed, this.cap, this.options.tiers);
   }
 
   private row(person: string, period: string): Row {
@@ -188,8 +189,7 @@ export class FakeFairMeter implements FairMeterApi {
 
 /** The refusal FairMeter returns for this code; the tier only where FairMeter knows it. */
 function refusal(error: RefusalCode, at: Date, tier?: Refusal['tier']): Refusal {
-  const t = at.getTime();
-  const retryAfterSeconds = Math.max(1, Math.ceil((Math.floor(t / 60_000) * 60_000 + 60_000 - t) / 1000));
+  const retryAfterSeconds = secondsToNextUtcMinute(at);
   const known = tier && error !== 'pricing_not_configured' && error !== 'metering_unavailable' ? { tier } : {};
   if (error === 'too_many_requests') return { ok: false, status: 429, body: { error, retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) }, ...known };
   const resetsAt = error === 'daily_limit_reached' || error === 'service_paused' ? { resetsAt: nextUtcDay(at) } : {};

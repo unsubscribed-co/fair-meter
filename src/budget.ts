@@ -50,6 +50,9 @@ export function budgetTier(usages: Array<Usage | undefined>, t: TierThresholds =
   return BUDGET_TIERS[rank];
 }
 
+/** The tier of a person's day: committed against the daily cap. */
+export const dayTier = (committedMicroUsd: number, capMicroUsd: number, t?: TierThresholds): BudgetTier => budgetTier([{ usedMicroUsd: committedMicroUsd, capMicroUsd }], t);
+
 export const headerTier = (tier: BudgetTier): HeaderTier => (tier === 'limit' ? 'essential' : tier);
 
 export const atLeast = (tier: BudgetTier, min: BudgetTier) => BUDGET_TIERS.indexOf(tier) >= BUDGET_TIERS.indexOf(min);

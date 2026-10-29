@@ -19,7 +19,7 @@ import { ACTION_LAG_MS } from './actions';
 import { assertTierThresholds, type TierThresholds } from './budget';
 import { usdToMicroUsd } from './cost';
 import { EXPORT_COLUMNS, streamFilterPattern } from './export';
-import type { FairMeterConfig } from './fair-meter';
+import type { Actions, FairMeterConfig } from './fair-meter';
 import { assertAppId, DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
 import { loadPriceFiles } from './prices';
 import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
@@ -654,7 +654,7 @@ export class Metering extends Construct {
       throw new Error('Metering: maxCallsPerMinute must be a positive integer');
     }
     if (props.tiers) assertTierThresholds(props.tiers);
-    const actions = props.actions && {
+    const actions: Actions | undefined = props.actions && {
       skus: props.actions.skus,
       perPersonPerMinute: props.actions.perPersonPerMinute ?? 20,
       maxConcurrency: props.actions.maxConcurrency ?? 10,
@@ -820,7 +820,7 @@ export class Metering extends Construct {
  * version of any action SKU.
  * Rounding each action up also covers the rollup's rounding up per window.
  */
-function floorMicroUsd(a: { skus: string[]; perPersonPerMinute: number; maxConcurrency: number }): number {
+function floorMicroUsd(a: Actions): number {
   for (const [name, v] of Object.entries({ perPersonPerMinute: a.perPersonPerMinute, maxConcurrency: a.maxConcurrency })) {
     if (!(Number.isSafeInteger(v) && v > 0)) throw new Error(`Metering: actions.${name} must be a positive integer`);
   }
