@@ -19,6 +19,9 @@ import { EXPORT_COLUMNS, streamFilterPattern } from './export';
 import { DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
 import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
 
+// esbuild skips tsconfig files inside node_modules, so name ours or the handlers lose "use strict" in an app's bundle.
+const BUNDLING = { minify: true, sourceMap: true, tsconfig: path.join(__dirname, '..', 'tsconfig.json') };
+
 /** Every construct takes the table's key names when they aren't the defaults (keys.ts). */
 interface TableKeysProps {
   /** e.g. `{ pk: 'pk', sk: 'sk' }`; omitted = PK / SK / USER#<sub>. Must match the app's `setTableKeys`. */
@@ -78,7 +81,7 @@ export class MeteringRetry extends Construct {
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
       loggingFormat: lambda.LoggingFormat.JSON,
-      bundling: { minify: true, sourceMap: true },
+      bundling: BUNDLING,
     });
     // The usage transaction: one conditional Put plus Updates.
     props.table.grant(this.fn, 'dynamodb:PutItem', 'dynamodb:UpdateItem');
@@ -185,7 +188,7 @@ export class MeteringExport extends Construct {
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
       loggingFormat: lambda.LoggingFormat.JSON,
-      bundling: { minify: true, sourceMap: true },
+      bundling: BUNDLING,
     });
     this.bucket.grantPut(this.fn);
     this.fn.addEventSource(
@@ -320,7 +323,7 @@ export class DeepSeekReconciliation extends Construct {
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
       loggingFormat: lambda.LoggingFormat.JSON,
-      bundling: { minify: true, sourceMap: true },
+      bundling: BUNDLING,
     });
     props.apiKeyParam.grantRead(this.fn);
     this.fn.addToRolePolicy(
@@ -457,7 +460,7 @@ export class FreeTierWatch extends Construct {
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
       loggingFormat: lambda.LoggingFormat.JSON,
-      bundling: { minify: true, sourceMap: true },
+      bundling: BUNDLING,
     });
     this.fn.addToRolePolicy(
       new iam.PolicyStatement({
