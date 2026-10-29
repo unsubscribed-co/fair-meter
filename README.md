@@ -17,6 +17,7 @@ npm install github:unsubscribed-co/fair-meter#v0.2.0
   - `@aws-sdk/client-s3` and `@aws-sdk/util-dynamodb`: `MeteringExport`;
   - `@aws-sdk/client-ssm`: `DeepSeekReconciliation`;
   - `@aws-sdk/client-cloudwatch`: `DeepSeekReconciliation` and `FreeTierWatch`;
+  - `@aws-sdk/client-cloudwatch-logs`: `Metering` with `actions` (the rollup);
   - `@types/aws-lambda`: only if your type check reaches `fair-meter/retry-handler` or `fair-meter/export-handler` (the constructs bundle them without it).
 - Jest must transform it: `transformIgnorePatterns: ['/node_modules/(?!fair-meter/)']`.
 
@@ -188,6 +189,11 @@ Why it bounds spend (prepaid, never debt): AI holds can't use the floor (`author
 
 **Reserved concurrency.** `maxConcurrency` must really bound the instances. With `reserveConcurrency: true` (prod), every function given to `grant` must set `reservedConcurrentExecutions`, at most `maxConcurrency` in total, or synth fails. Without it (dev), nothing is checked and the account's concurrency limit is the bound: keep `maxConcurrency` at least that limit (the dev account's limit is 10, the default; AWS refuses any reservation there).
 
+**How actions are charged (the rollup).** With `actions`, `Metering` adds a Lambda that runs on every quarter hour (`cron(0/15 * * * ? *)`; a `rate()` could start anywhere in a window and leave it waiting 45 minutes, past the floor's 30). Each run takes every fixed 15-minute UTC window after its cursor whose start is at least 30 minutes old, oldest first, at most 8 a run (so a missed run catches up), and for each one runs one Logs Insights query over the log groups of the functions given to `grant`: the lines with `fairMeter = "action"` and the app's id, `sum(n)` by person, SKU and env. Each row becomes one EVENT (`kind: 'actions'`, `requestId: actions-<sku>-<windowStart>`, at the window's start, so an action at 23:50 UTC counts on that day) costing `ceil(n x microUsdPerKUnits / 1000)` at the price version valid at the window's start, counted in the AWS provider counter and added to the person's `committedMicroUsd`, where `canWrite` reads it. The EVENT key is deterministic, so a rerun or an overlapping run is a `duplicate`, never a second charge. The cursor (`ROLLUP#<app>` / `CURSOR`) moves past a window only once all its records are written; the first run starts at the current window (no backfill). Lines arrive in Logs up to about 10 minutes late, so a window is queried 15 minutes after it closes: an action is charged 15 to 30 minutes after it happens.
+- An SKU with no price version at the window's start logs `ACTION_UNPRICED`, and the cursor waits there; sync the price and the next run charges it. Log retention (a month) is the horizon.
+- 10,000 rows or more in one window (people x SKUs) fail it with `ROLLUP_TRUNCATED`; any failure logs `ROLLUP_FAILED` and the run fails. A run that starts with a window more than 35 minutes old logs `ROLLUP_LATE`. These terms join the metering error alarm, fed by the rollup's own log group too, and `RollupFailureAlarm` fires on a run that crashes or times out.
+- Cost: Logs Insights charges per GB scanned ($0.005 at list), and it scans every line of the granted functions' log groups in the window, not only the action lines. Windows don't overlap, so each byte is scanned once: about 1% on top of the $0.50 per GB those logs cost to ingest. One query per window, 96 a day.
+
 ### Known limits (v0.2.0)
 
 - **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the reservation. Conservative: the cap is tighter, never overshot.
@@ -198,6 +204,8 @@ Why it bounds spend (prepaid, never debt): AI holds can't use the floor (`author
 - **`sync` only adds.** A version in the table that no file has (e.g. from the old admin CLI) is kept, and closed by the next file version. Nothing is overwritten, but the files are not yet the only home.
 - **The sweeper is serial, 60 s per run.** After an outage with thousands of open holds it takes several runs, each timing out (SweeperFailureAlarm). It converges, because settled rows disappear.
 - **The action count lives in each instance's memory.** A new instance (a cold start, a crash, a deploy) starts at zero for the current minute, so a replaced instance can let a person do up to `perPersonPerMinute` more that minute. The floor assumes the rollup counts every action within 30 minutes; an outage of the rollup alarms.
+- **The floor holds only while the rollup runs.** While it is down or blocked on an unpriced SKU, actions go uncounted and a person can spend past the cap until it catches up (`ROLLUP_LATE`, `ACTION_UNPRICED` and `RollupFailureAlarm` alarm). Hosted billing will also need the cursor's freshness in `canWrite`.
+- **Dropped log lines are absorbed.** A line Logs never receives, or one that arrives after its window was settled, is never charged: the operator pays for it.
 
 What lands in the ledger table: `USER#<person>` / `EVENT#<at>#<app>#<callId>` per settled attempt (with `env`, `paidBy`, `reservedMicroUsd`, `estimated` when it is), the usual day, month, app, all-apps and provider counters, and `PENDING#<app>` / `CALL#<callId>` while an attempt is open. All money is integer micro-USD, rounded up.
 

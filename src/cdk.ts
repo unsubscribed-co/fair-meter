@@ -609,25 +609,31 @@ export interface MeteringProps {
 }
 
 /** Log terms that mean money may be wrong or calls are refused; each alarms within 5 minutes. */
-const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED', 'RESERVATION_EXCEEDED', 'USAGE_RECORD_PARKED', 'ACTION_UNKNOWN'];
+const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED', 'RESERVATION_EXCEEDED', 'USAGE_RECORD_PARKED', 'ACTION_UNKNOWN',
+  'ACTION_UNPRICED', 'ROLLUP_TRUNCATED', 'ROLLUP_FAILED', 'ROLLUP_LATE'];
 
 /**
  * FairMeter's infrastructure, from one config: the retry queue (MeteringRetry), the sweeper that
- * settles holds nobody settled, and their alarms, all writing to the ledger table it owns.
- * `grant(fn)` lets an app function use `new FairMeter()`: IAM on the ledger table and queue, the
- * FAIR_METER env, and an alarm on its metering error lines.
+ * settles holds nobody settled, with `actions` the rollup that charges them, and their alarms, all
+ * writing to the ledger table it owns. `grant(fn)` lets an app function use `new FairMeter()`: IAM on
+ * the ledger table and queue, the FAIR_METER env, an alarm on its metering error lines, and its log
+ * group in the rollup's query.
  */
 export class Metering extends Construct {
   /** The ledger table: prices, counters, holds and the ledger, nothing of the app's. */
   readonly table: dynamodb.Table;
   readonly retry: MeteringRetry;
   readonly sweeper: lambdaNode.NodejsFunction;
+  /** With `actions`: the rollup (rollup-handler.ts) that charges the granted functions' action lines. */
+  readonly rollup?: lambdaNode.NodejsFunction;
   /** FairMeterConfig as the app reads it (table name and queue URL are CloudFormation tokens). */
   readonly config: FairMeterConfig;
   private readonly errors: cloudwatch.Metric;
   private grants = 0;
   /** With `actions.reserveConcurrency`: the most the granted functions may reserve, and what they reserve so far. */
   private readonly concurrency?: { max: number; reserved: number };
+  /** The granted functions' log group names, which the rollup queries. */
+  private readonly logGroups: string[] = [];
 
   constructor(scope: Construct, id: string, props: MeteringProps) {
     super(scope, id);
@@ -732,6 +738,38 @@ export class Metering extends Construct {
     // A record retried from the queue can still turn out a conflict: its Lambda's logs feed the same alarm.
     this.watchErrors(this.retry.fn);
     this.watchErrors(this.retry.redrive);
+    if (actions) {
+      const rollup = new lambdaNode.NodejsFunction(this, 'Rollup', {
+        entry: path.join(__dirname, 'rollup-handler.ts'),
+        runtime: lambda.Runtime.NODEJS_24_X,
+        architecture: lambda.Architecture.ARM_64,
+        memorySize: 256,
+        // Up to 8 windows, one Logs Insights query each; well inside the 15 minutes between runs.
+        timeout: cdk.Duration.minutes(5),
+        environment: {
+          FAIR_METER: cdk.Stack.of(this).toJsonString(this.config),
+          LOG_GROUPS: cdk.Lazy.string({ produce: () => cdk.Fn.join(',', this.logGroups) }),
+          NODE_OPTIONS: '--enable-source-maps',
+        },
+        logGroup: new logs.LogGroup(this, 'RollupLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.DESTROY }),
+        loggingFormat: lambda.LoggingFormat.JSON,
+        bundling: BUNDLING,
+      });
+      // Prices, the cursor and the usage transaction. StartQuery is granted per log group in grant().
+      this.table.grant(rollup, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem');
+      rollup.addToRolePolicy(new iam.PolicyStatement({ actions: ['logs:GetQueryResults'], resources: ['*'] }));
+      // On the quarter hours: rate() can start anywhere in a window, so a window could wait 45 minutes, past the floor's 30.
+      new events.Rule(this, 'RollupSchedule', {
+        description: `Charge ${props.appId} action lines per person, SKU and 15-minute window`,
+        schedule: events.Schedule.cron({ minute: '0/15' }),
+        targets: [new eventsTargets.LambdaFunction(rollup, { retryAttempts: 2 })],
+      });
+      // A late window logs ROLLUP_LATE; a run that crashes or times out before logging anything alarms here.
+      alarm('RollupFailureAlarm', `${where}: the action rollup failed; actions stay uncharged and the floor stops holding: check its logs`,
+        rollup.metricErrors({ period: cdk.Duration.minutes(15) }));
+      this.watchErrors(rollup);
+      this.rollup = rollup;
+    }
     alarm('ErrorsAlarm', `${where}: a metering error (${METERING_ERRORS.join(', ')}): check the app function's logs`, this.errors);
   }
 
@@ -753,6 +791,10 @@ export class Metering extends Construct {
     this.retry.queue.grantSendMessages(fn);
     fn.addEnvironment('FAIR_METER', cdk.Stack.of(this).toJsonString(this.config));
     this.watchErrors(fn);
+    if (this.rollup) {
+      this.logGroups.push(fn.logGroup.logGroupName);
+      this.rollup.addToRolePolicy(new iam.PolicyStatement({ actions: ['logs:StartQuery'], resources: [fn.logGroup.logGroupArn] }));
+    }
   }
 
   /** Counts `fn`'s metering error lines into the ErrorsAlarm metric. */

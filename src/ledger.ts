@@ -159,7 +159,9 @@ export function usageTransaction(table: string, r: UsageRecord) {
   ];
 
   return new TransactWriteCommand({
-    ClientRequestToken: clientRequestToken(r.appId, r.requestId),
+    // An actions requestId is per SKU and window, not per person, so one token would collide across
+    // people: the EVENT's condition alone keeps it exactly once.
+    ...(r.kind === 'actions' ? {} : { ClientRequestToken: clientRequestToken(r.appId, r.requestId) }),
     TransactItems: [
       {
         Put: {
@@ -188,7 +190,10 @@ export function usageTransaction(table: string, r: UsageRecord) {
       },
       { Update: { TableName: table, Key: keys.userMonth(r.sub, r.appId, month), ...personal } },
       held === undefined
-        ? counter(keys.userDay(r.sub, r.appId, day))
+        ? r.kind === 'actions'
+          // Rolled-up actions count toward the cap like a settled hold: the write check reads committed.
+          ? { Update: { TableName: table, Key: keys.userDay(r.sub, r.appId, day), UpdateExpression: `${personal.UpdateExpression}, committedMicroUsd :cost`, ExpressionAttributeValues: personal.ExpressionAttributeValues } }
+          : counter(keys.userDay(r.sub, r.appId, day))
         : {
             Update: {
               TableName: table,
