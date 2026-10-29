@@ -738,6 +738,7 @@ export class Metering extends Construct {
     // A record retried from the queue can still turn out a conflict: its Lambda's logs feed the same alarm.
     this.watchErrors(this.retry.fn);
     this.watchErrors(this.retry.redrive);
+    let errors: cloudwatch.IMetric = this.errors;
     if (actions) {
       const rollup = new lambdaNode.NodejsFunction(this, 'Rollup', {
         entry: path.join(__dirname, 'rollup-handler.ts'),
@@ -764,13 +765,16 @@ export class Metering extends Construct {
         schedule: events.Schedule.cron({ minute: '0/15' }),
         targets: [new eventsTargets.LambdaFunction(rollup, { retryAttempts: 2 })],
       });
-      // A late window logs ROLLUP_LATE; a run that crashes or times out before logging anything alarms here.
-      alarm('RollupFailureAlarm', `${where}: the action rollup failed; actions stay uncharged and the floor stops holding: check its logs`,
-        rollup.metricErrors({ period: cdk.Duration.minutes(15) }));
+      // A late window logs ROLLUP_LATE; a run that crashes or times out before logging anything counts as a metering error too.
+      errors = new cloudwatch.MathExpression({
+        expression: 'FILL(errors, 0) + FILL(rollupFailures, 0)',
+        usingMetrics: { errors: this.errors, rollupFailures: rollup.metricErrors({ period: cdk.Duration.minutes(5) }) },
+        period: cdk.Duration.minutes(5),
+      });
       this.watchErrors(rollup);
       this.rollup = rollup;
     }
-    alarm('ErrorsAlarm', `${where}: a metering error (${METERING_ERRORS.join(', ')}): check the app function's logs`, this.errors);
+    alarm('ErrorsAlarm', `${where}: a metering error (${METERING_ERRORS.join(', ')})${actions ? ' or a failed rollup run' : ''}: check the app function's logs`, errors);
   }
 
   /**

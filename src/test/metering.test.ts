@@ -260,12 +260,20 @@ describe('actions: the floor and the write check', () => {
       expect(JSON.stringify(dynamo[0].Resource)).toMatch(/^\[\{"Fn::GetAtt":\["MeteringLedger\w+","Arn"\]\}/);
     });
 
-    test('its terms join the metering error alarm, fed by its own log group too; a failed or timed-out run alarms', () => {
+    test('its terms join the metering error alarm, fed by its own log group too; a failed or timed-out run alarms there too (no new alarm)', () => {
       const { t } = synth({ actions: { skus } });
       const pattern = Match.stringLikeRegexp('ACTION_UNPRICED.*ROLLUP_TRUNCATED.*ROLLUP_FAILED.*ROLLUP_LATE');
       t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: pattern, LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') } });
       t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: pattern, LogGroupName: { Ref: Match.stringLikeRegexp('^MeteringRollupLogs') }, MetricTransformations: [Match.objectLike({ MetricName: 'stacksplit-prod-MeteringErrors' })] });
-      t.hasResourceProperties('AWS::CloudWatch::Alarm', { MetricName: 'Errors', Dimensions: [{ Name: 'FunctionName', Value: { Ref: rollupOf(t)![0] } }], Threshold: 1, AlarmActions: Match.anyValue() });
+      expect(Object.values(t.findResources('AWS::CloudWatch::Alarm'))).toHaveLength(5);
+      t.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        Threshold: 1,
+        AlarmActions: Match.anyValue(),
+        Metrics: Match.arrayWith([
+          Match.objectLike({ MetricStat: Match.objectLike({ Metric: Match.objectLike({ MetricName: 'stacksplit-prod-MeteringErrors' }) }) }),
+          Match.objectLike({ MetricStat: Match.objectLike({ Metric: { MetricName: 'Errors', Namespace: 'AWS/Lambda', Dimensions: [{ Name: 'FunctionName', Value: { Ref: rollupOf(t)![0] } }] } }) }),
+        ]),
+      });
     });
   });
 
