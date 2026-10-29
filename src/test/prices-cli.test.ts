@@ -171,6 +171,20 @@ describe('sync', () => {
     await expect(syncPrices(ddb(), 't', [haiku], NOW, false)).rejects.toThrow(/after the latest/);
   });
 
+  test('a new version must start at least 10 minutes ahead: warm instances cache prices for 5', async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [stored(haiku.versions[0])] });
+    const startingAt = (validFrom: string): PriceFile => ({ ...haiku, versions: [haiku.versions[0], { ...haiku.versions[1], validFrom }] });
+    await expect(syncPrices(ddb(), 't', [startingAt('2026-10-28T12:09:59Z')], NOW, false)).rejects.toThrow(/2026-10-28T12:09:59Z.*less than 10 minutes.*cache/);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    expect(await syncPrices(ddb(), 't', [startingAt('2026-10-28T12:10:00Z')], NOW, false)).toEqual([expect.stringContaining('2026-10-28T12:10:00Z added')]);
+  });
+
+  test('a SKU with no stored version may start at once', async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    const now = { ...haiku, versions: [{ ...haiku.versions[0], validFrom: '2026-10-28T12:00:00Z' }] };
+    expect(await syncPrices(ddb(), 't', [now], NOW, false)).toEqual(['claude-haiku-5-5@2026-10-28T12:00:00Z added']);
+  });
+
   test('--dry-run writes nothing and says what it would do', async () => {
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     const lines = await syncPrices(ddb(), 't', [haiku], NOW, true);

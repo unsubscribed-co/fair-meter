@@ -43,6 +43,9 @@ try {
 - `max` must bound the real usage: the cap is only as good as it. Tokens: `inputTokens` = the UTF-8 bytes of everything sent (text tokens are never fewer than bytes), `outputTokens` = the `max_tokens` sent. **The bytes bound fails for images and files sent by URL or file id** (a 100-byte URL can cost thousands of tokens): add the provider's token count for each such part. `{ chars }`, `{ units }` or `{ requests }` for other prices;
 - a malformed request (from untyped JavaScript) is refused with 500 `metering_unavailable` and alarms; `authorize` never throws;
 - returns `{ ok: true, tier, callId, hold }` (one fresh `callId` per attempt), or `{ ok: false, status, body, headers }`: `daily_limit_reached` (429, `resetsAt`), `too_many_requests` (429, `Retry-After`), `service_paused`, `pricing_not_configured`, `metering_unavailable` (503).
+- logs one info line per call, refusals included: `AUTHORIZE_TIMING` `{ appId, sku, outcome, readsMs, reserveMs, totalMs, attempts }` (`outcome` is `ok` or the refusal code; `readsMs` the parallel reads, `reserveMs` the reserve transaction with its resends, `attempts` how many times it was sent, 0 when refused before it).
+
+Each `FairMeter` caches a SKU's price versions for 5 minutes and picks the one valid at the call's time from them, so a warm instance doesn't query prices on every call. A SKU with no version isn't cached: one synced later is found on the next call.
 
 **`record(call, usage)`**, after the attempt, whatever happened. Settles the reservation exactly once:
 
@@ -96,11 +99,35 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts sync --table <ledger table> [-
 npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <name> [--keys pk,sk]
 ```
 
-`sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
+`sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. A new version must start at least 10 minutes after `sync` runs (twice the 5-minute price cache, so no warm instance prices a call at the old version after the change); a SKU with no stored version may start at once. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
 
 **Action SKUs** are ordinary price files, `prices/<app>-<action>.json`, with `provider: "aws"` and `unit: "units"` (one unit is one action). Each version has `microUsdPerKUnits` and `components: { database, api, compute, logs, other }`, integer micro-USD per 1,000 actions; the parser requires exactly those five and their sum equal to `microUsdPerKUnits`, and `source` is the AWS Price List URL. They sync and price like any `units` SKU, and `price-history` shows the components. None is seeded yet: the first ones come from a measurement.
 
 **The fee** has one home, `prices/fee.json`: `{ "versions": [{ "validFrom", "feeBps" }] }`, in basis points of cost, versioned like a price (today 10000, 100% of cost, from 2026-10-29). `billing: 'none'` means no fee: v0.3.0 never applies it, and `'hosted'` (which will) is refused until the wallet exists. `sync` skips `fee.json` and `prices/apps/`.
+
+**Reproducing an app's price list.** An app's measurement lives in `prices/apps/<app>.json`: its `region`, per action SKU the measured averages per action (`rru`, `wru`, `apiRequests`, `lambdaRequests`, `billedMs`, `memoryMb`, `logBytes`, from `samples` requests at `measuredAt`), and three profiles, `light`, `regular` and `heavy`, each with actions a day per SKU and AI calls a day per SKU with the average meters of one call:
+
+```json
+{
+  "region": "us-east-1",
+  "actions": {
+    "myapp-add": { "rru": 2, "wru": 3, "apiRequests": 1, "lambdaRequests": 1, "billedMs": 40, "memoryMb": 1024, "logBytes": 2048, "samples": 50, "measuredAt": "2026-11-01T00:00:00Z" }
+  },
+  "profiles": {
+    "light": { "actions": { "myapp-add": 10 }, "ai": { "claude-haiku-5-5": { "callsPerDay": 1, "meters": { "inputTokens": 2000, "outputTokens": 400 } } } },
+    "regular": { "actions": { "myapp-add": 50 }, "ai": { "claude-haiku-5-5": { "callsPerDay": 5, "meters": { "inputTokens": 2000, "outputTokens": 400 } } } },
+    "heavy": { "actions": { "myapp-add": 200 }, "ai": { "claude-haiku-5-5": { "callsPerDay": 20, "meters": { "inputTokens": 2000, "outputTokens": 400 } } } }
+  }
+}
+```
+
+The profiles every app uses: light is 1 AI call and 10 actions a day, regular 5 and 50, heavy 20 and 200. Then, with no AWS credentials:
+
+```sh
+npx tsx node_modules/fair-meter/src/prices-cli.ts list <app> [--write --valid-from <iso>]
+```
+
+`list` downloads the region's public Price List offer files (DynamoDB, Lambda, API Gateway, CloudWatch) and takes each first-tier on-demand list rate, no free tier; a rate it can't find stops the run, naming it. Per action, each component per 1,000 actions, rounded up: database = `rru` plus the write check's half read unit at the read request rate, plus `wru` at the write request rate; API = `apiRequests` at the HTTP API rate; compute = `lambdaRequests` at the Arm request rate plus `billedMs` x `memoryMb` as Arm GB-seconds; logs = `logBytes` ingested plus the same bytes scanned once by the rollup (GB = 2^30 bytes); other = 0. It prints each line (components, cost, fee from `prices/fee.json`, price) and per profile the monthly cost (30 days), the price with the fee and how many days $2 lasts; AI calls are priced at their SKU's current version. `--write` appends a version starting at `--valid-from` to each `prices/<sku>.json` whose rates differ from its latest version (creating the file for a new SKU; a version is never edited), refuses a `validFrom` less than 10 minutes ahead, and writes the published list, `prices/apps/<app>.list.json`. Then `sync`.
 
 ### Known limits (v0.2.0)
 
