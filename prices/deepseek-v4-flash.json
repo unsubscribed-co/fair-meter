@@ -1,0 +1,23 @@
+{
+  "provider": "deepseek",
+  "unit": "tokens",
+  "versions": [
+    {
+      "validFrom": "2026-10-28T00:00:00Z",
+      "inputMicroUsdPerMTok": 150000,
+      "cachedInputMicroUsdPerMTok": 3000,
+      "outputMicroUsdPerMTok": 600000,
+      "bands": [
+        {
+          "name": "peak",
+          "days": [1, 2, 3, 4, 5],
+          "hours": [{ "startHour": 1, "endHour": 4 }, { "startHour": 6, "endHour": 10 }],
+          "inputMicroUsdPerMTok": 300000,
+          "cachedInputMicroUsdPerMTok": 6000,
+          "outputMicroUsdPerMTok": 1200000
+        }
+      ],
+      "source": "https://api-docs.deepseek.com/quick_start/pricing"
+    }
+  ]
+}

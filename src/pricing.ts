@@ -196,7 +196,7 @@ export function priceCall(version: Record<string, any>, usage: CallUsage, at: Da
  * The most a call within `max` can cost at `at`, in micro-USD; undefined when `max` doesn't fit the
  * price's shape. Tokens: every input token at the dearest input-side rate (input, cache read or
  * write) and every output token at the dearest output-side rate (output or reasoning), over the
- * band's card and all its context tiers, so it bounds whatever usage the provider reports.
+ * band's card and every context tier it could reach, so it bounds whatever usage the provider reports.
  */
 export function reserveCost(version: Record<string, any>, max: Record<string, unknown>, at: Date): number | undefined {
   const shape = priceShape(version);
@@ -204,7 +204,8 @@ export function reserveCost(version: Record<string, any>, max: Record<string, un
   if (shape === 'tokens') {
     if (fields !== 'inputTokens,outputTokens' || !isRate(max.inputTokens) || !isRate(max.outputTokens)) return undefined;
     const { card } = cardAt(scheduleFromItem(version)!, at);
-    const cards: Price[] = [card, ...(card.tiers ?? [])];
+    // A tier applies only above its threshold, and prompt tokens never exceed maxIn.
+    const cards: Price[] = [card, ...(card.tiers ?? []).filter((t) => (max.inputTokens as number) > t.aboveInputTokens)];
     const inRate = Math.max(...cards.map((c) => Math.max(c.inputMicroUsdPerMTok, c.cachedInputMicroUsdPerMTok, c.cacheWriteMicroUsdPerMTok ?? 0)));
     const outRate = Math.max(...cards.map((c) => Math.max(c.outputMicroUsdPerMTok, c.reasoningMicroUsdPerMTok ?? 0)));
     const meters = { inputTokens: max.inputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: max.outputTokens, reasoningTokens: 0 };

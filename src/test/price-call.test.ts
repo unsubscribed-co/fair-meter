@@ -34,6 +34,13 @@ describe('reserveCost (T13)', () => {
     expect(reserveCost(haiku, { inputTokens: 30_000, outputTokens: 4_096 }, OFF)).toBe(5_798);
   });
 
+  test("a context tier counts only when max could reach it (prompt tokens can't exceed maxIn)", () => {
+    const tiered = { ...haiku, tiers: busy.tiers };
+    expect(reserveCost(tiered, { inputTokens: 30_000, outputTokens: 4_096 }, OFF)).toBe(5_798);
+    expect(reserveCost(tiered, { inputTokens: 100_000, outputTokens: 0 }, OFF)).toBe(12_500);
+    expect(reserveCost(tiered, { inputTokens: 100_001, outputTokens: 0 }, OFF)).toBe(62_501);
+  });
+
   test('a max that does not match the price shape is undefined', () => {
     expect(reserveCost(haiku, { chars: 10 }, OFF)).toBeUndefined();
     expect(reserveCost(haiku, { inputTokens: -1, outputTokens: 1 }, OFF)).toBeUndefined();

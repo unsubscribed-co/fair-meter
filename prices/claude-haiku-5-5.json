@@ -1,0 +1,23 @@
+{
+  "provider": "anthropic",
+  "unit": "tokens",
+  "versions": [
+    {
+      "validFrom": "2026-10-28T00:00:00Z",
+      "inputMicroUsdPerMTok": 100000,
+      "cachedInputMicroUsdPerMTok": 10000,
+      "cacheWriteMicroUsdPerMTok": 125000,
+      "outputMicroUsdPerMTok": 500000,
+      "tiers": [
+        {
+          "aboveInputTokens": 100000,
+          "inputMicroUsdPerMTok": 500000,
+          "cachedInputMicroUsdPerMTok": 50000,
+          "cacheWriteMicroUsdPerMTok": 625000,
+          "outputMicroUsdPerMTok": 2500000
+        }
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    }
+  ]
+}
