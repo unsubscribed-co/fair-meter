@@ -2,23 +2,85 @@
 
 Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): every paid call is priced at the provider's list price and written to an append-only ledger in the app's own DynamoDB table, with caps and a per-minute brake before the call. Self-hosted copies run it with `billing: 'none'`: the ledger and caps stay on, nobody is charged.
 
-**v0.1.0 is a pure move** of Nieto's metering module (`unsubscribed-co/nieto`, `backend/lambda/metering/` at commit `b3790cf`), unchanged. The text below is that module's README; paths like `lambda/proxy/handler.ts` are Nieto's.
+**v0.2.0 adds the money path** for apps: `FairMeter` (below). The older surface (`Meter`, the record builders, households and plans) is Nieto's, unchanged, until Nieto moves to `FairMeter` in v0.3.0; its README follows "Start here".
 
 ## Install
 
 TypeScript source, no build step: your bundler (esbuild via CDK's `NodejsFunction`) compiles it with your code.
 
 ```
-npm install github:unsubscribed-co/fair-meter#v0.1.0
+npm install github:unsubscribed-co/fair-meter#v0.2.0
 ```
 
-- `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/<file>` reaches one file.
+- `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/<file>` reaches one file.
 - Peer dependencies: `aws-cdk-lib`, `constructs`, the AWS SDK v3 clients listed in `package.json`, `@types/aws-lambda`.
 - Jest must transform it: `transformIgnorePatterns: ['/node_modules/(?!fair-meter/)']`.
 
-**Start with these three:** `new Meter(config, clients)`; `authorize(sub, at)` before the paid call; build a record with `tokenRecord()`, `charRecord()`, `requestRecord()` or `unitRecord()` and write it with `record()`. The rest is exported for admin tools and may change.
-
 License: AGPL-3.0.
+
+## Start here
+
+Two calls around every paid provider attempt, one construct, one folder of prices. Every retry, hedge and fallback is its own attempt.
+
+```ts
+import { FairMeter } from 'fair-meter';
+const meter = new FairMeter(); // config from the FAIR_METER env, written by the Metering construct
+
+const call = await meter.authorize({ person, sku: 'claude-haiku-5-5', paidBy: 'credit', max: { inputTokens: utf8Bytes, outputTokens: maxTokens } });
+if (!call.ok) return reply(call.status, call.body, call.headers); // ready HTTP answer: 429 or 503
+let spent: object | undefined | 'unknown' | 'not_billed' = 'unknown';
+try {
+  const res = await callProvider({ max_tokens: maxTokens });
+  spent = res.ok ? res.body.usage : 'not_billed';
+} finally {
+  await meter.record(call, spent); // never throws
+}
+```
+
+**`authorize({ person, sku, max, paidBy? })`**, before the attempt:
+- reads the SKU's price version valid now, the person's day, and the app and all-apps breakers;
+- reserves the most this attempt can cost against the person's daily cap, in one transaction (a `PENDING#<app>` row plus a conditional add on the day's `committedMicroUsd`), so parallel calls can't overshoot the cap;
+- `max`: tokens: `inputTokens` = the UTF-8 bytes of everything sent (always >= tokens), `outputTokens` = the `max_tokens` sent. `{ chars }`, `{ units }` or `{ requests }` for other prices;
+- returns `{ ok: true, tier, callId, hold }` (one fresh `callId` per attempt), or `{ ok: false, status, body, headers }`: `daily_limit_reached` (429, `resetsAt`), `too_many_requests` (429, `Retry-After`), `service_paused`, `pricing_not_configured`, `metering_unavailable` (503).
+
+**`record(call, usage)`**, after the attempt, whatever happened. Settles the reservation exactly once:
+
+| `usage` | When | Settled at |
+|---|---|---|
+| the provider's usage block | it answered | the actual cost (the price's provider picks the adapter) |
+| `{ estimate: <usage block> }` | the app aborted it but can guess (a hedge loser's input tokens) | that estimate, `estimated: 'aborted'`, no alarm |
+| `'unknown'` | aborted or lost with no guess (timeout, network error after sending) | the reservation, `estimated: 'aborted'`, no alarm |
+| `'not_billed'` | an error status the provider doesn't bill (4xx, 5xx, 429) | nothing: the hold is released, no EVENT |
+| `undefined` or malformed | a 200 without usable usage | the reservation, `estimated: 'no_usage'`, USAGE_MISSING alarms |
+
+Outcomes: `recorded`, `duplicate`, `trued_up` (real usage after the sweeper's estimate, written as an ADJUST), `conflict` (another payload for a settled call: refused, RECORD_CONFLICT alarms), `deferred` (queued), `failed` (queue down too: USAGE_RECORD_FAILED; the sweeper still settles the hold). A cost above the reservation is recorded as it is and logs RESERVATION_EXCEEDED.
+
+**`Metering`** (`fair-meter/cdk`), once per app and stage:
+
+```ts
+const metering = new Metering(this, 'Metering', {
+  table, appId: 'stacksplit', env: stage, alarmAction, tableKeys: { pk: 'pk', sk: 'sk' },
+  dailyCapUsd: '0.50', appDailyCapUsd: '5', // decimal USD, parsed exactly at synth
+});
+metering.grant(fn); // IAM, the FAIR_METER env, an alarm on fn's metering error lines
+```
+
+It creates the retry queue and its Lambda (`MeteringRetry`, DLQ alarms on depth and on a 7-day-old message) and the sweeper: every 10 minutes it settles holds left open for 30 minutes (a crash between authorize and the settle) at their reservation, `estimated: 'swept'`, and alarms. Give `fn` its own `logGroup`. Optional: `allAppsDailyCapUsd`, `maxCallsPerMinute` (needs TTL on `expiresAt`), `tiers`. `billing: 'hosted'` is refused until the wallet exists.
+
+**Prices** live in this repo, `prices/<sku>.json`, one file per SKU: `provider`, `unit` (`tokens`, `chars`, `units`, `requests`) and immutable `versions`, each with `validFrom`, the rates in PRICING item fields (integer micro-USD) and the provider's pricing page as `source`. To put them in a table:
+
+```
+npx tsx node_modules/fair-meter/src/prices-cli.ts sync --table <name> [--keys pk,sk] [--dry-run]
+npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <name> [--keys pk,sk]
+```
+
+`sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
+
+What lands in the table: `USER#<person>` / `EVENT#<at>#<app>#<callId>` per settled attempt (with `env`, `paidBy`, `reservedMicroUsd`, `estimated` when it is), the usual day, month, app, all-apps and provider counters, and `PENDING#<app>` / `CALL#<callId>` while an attempt is open. All money is integer micro-USD, rounded up.
+
+## The old surface (Nieto's, until v0.3.0)
+
+Nieto's metering module (`unsubscribed-co/nieto`, `backend/lambda/metering/` at commit `b3790cf`), moved unchanged in v0.1.0; paths like `lambda/proxy/handler.ts` are Nieto's. Start with `new Meter(config, clients)`; `authorize(sub, at)` before the paid call; build a record with `tokenRecord()`, `charRecord()`, `requestRecord()` or `unitRecord()` and write it with `record()`. The rest is exported for admin tools and may change.
 
 ## The module (from Nieto)
 
