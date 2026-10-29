@@ -62,18 +62,18 @@ If the reserve write fails ambiguously (a timeout or 5xx: it may have committed)
 
 ```ts
 const metering = new Metering(this, 'Metering', {
-  table, appId: 'stacksplit', env: stage, alarmAction, tableKeys: { pk: 'pk', sk: 'sk' },
+  appId: 'stacksplit', env: stage,
   dailyCapUsd: '0.50', appDailyCapUsd: '5', // decimal USD, parsed exactly at synth
 });
-metering.grant(fn); // IAM, the FAIR_METER env, an alarm on fn's metering error lines
+metering.grant(fn); // IAM on the ledger table, the FAIR_METER env, an alarm on fn's metering error lines
 ```
 
-It creates the retry queue and its Lambda (`MeteringRetry`, DLQ alarms on depth and on a 7-day-old message) and the sweeper: every 10 minutes it settles holds left open for 30 minutes (a crash between authorize and the settle) at their reservation, `estimated: 'swept'`, and alarms. Give `fn` its own `logGroup`. Optional: `allAppsDailyCapUsd`, `maxCallsPerMinute` (needs TTL on `expiresAt`), `tiers`. `billing: 'hosted'` is refused until the wallet exists.
+It creates the ledger table, `metering.table` and a stack output: on-demand, `PK`/`SK`, TTL on `expiresAt`, point-in-time recovery, deletion protected and retained when the stack is deleted. Prices, counters, holds and the ledger live there, nothing of your app's; your `authorize` and `record` code needs no table settings. It also creates the retry queue and its Lambda (`MeteringRetry`, DLQ alarms on depth and on a 7-day-old message) and the sweeper: every 10 minutes it settles holds left open for 30 minutes (a crash between authorize and the settle) at their reservation, `estimated: 'swept'`, and alarms. Give `fn` its own `logGroup`. Optional: `alarmAction` (without it the alarms exist with no action, fine for dev), `allAppsDailyCapUsd`, `maxCallsPerMinute`, `tiers`. `billing: 'hosted'` is refused until the wallet exists.
 
-**Prices** live in this repo, `prices/<sku>.json`, one file per SKU: `provider`, `unit` (`tokens`, `chars`, `units`, `requests`) and immutable `versions`, each with `validFrom`, the rates in PRICING item fields (integer micro-USD) and the provider's pricing page as `source`. To put them in a table:
+**Prices** live in this repo, `prices/<sku>.json`, one file per SKU: `provider`, `unit` (`tokens`, `chars`, `units`, `requests`) and immutable `versions`, each with `validFrom`, the rates in PRICING item fields (integer micro-USD) and the provider's pricing page as `source`. To put them in the ledger table (its name is the stack output):
 
 ```
-npx tsx node_modules/fair-meter/src/prices-cli.ts sync --table <name> [--keys pk,sk] [--dry-run]
+npx tsx node_modules/fair-meter/src/prices-cli.ts sync --table <ledger table> [--dry-run]
 npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <name> [--keys pk,sk]
 ```
 
@@ -84,12 +84,16 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <n
 - **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the reservation. Conservative: the cap is tighter, never overshot.
 - **Request-priced counters count calls.** `{ requests: 3 }` costs 3 requests, but the counters add `requests` 1 (one call). The money is right.
 - **Late-usage ADJUSTs export only their cost.** Their meters and band stay on the ADJUST item, not in the export columns, and their `createdAt` is the call's time (so retries are identical), not when the correction was written.
-- **IAM is table-wide.** `grant(fn)` allows Query, Get, Put, Update and Delete on the whole table, including `PRICING#*` and other apps' rows; it could be narrowed by leading key.
+- **IAM is ledger-table-wide.** `grant(fn)` allows Query, Get, Put, Update and Delete on the whole ledger table, including `PRICING#*`; it could be narrowed by leading key. It never reaches the app's own tables.
 - **One hot partition per app.** Every attempt writes and deletes a `PENDING#<app>` row: about 500 attempts a second per app before DynamoDB's per-partition limit. Shard the key if an app gets there.
 - **`sync` only adds.** A version in the table that no file has (e.g. from the old admin CLI) is kept, and closed by the next file version. Nothing is overwritten, but the files are not yet the only home.
 - **The sweeper is serial, 60 s per run.** After an outage with thousands of open holds it takes several runs, each timing out (SweeperFailureAlarm). It converges, because settled rows disappear.
 
-What lands in the table: `USER#<person>` / `EVENT#<at>#<app>#<callId>` per settled attempt (with `env`, `paidBy`, `reservedMicroUsd`, `estimated` when it is), the usual day, month, app, all-apps and provider counters, and `PENDING#<app>` / `CALL#<callId>` while an attempt is open. All money is integer micro-USD, rounded up.
+What lands in the ledger table: `USER#<person>` / `EVENT#<at>#<app>#<callId>` per settled attempt (with `env`, `paidBy`, `reservedMicroUsd`, `estimated` when it is), the usual day, month, app, all-apps and provider counters, and `PENDING#<app>` / `CALL#<callId>` while an attempt is open. All money is integer micro-USD, rounded up.
+
+## Upgrading from v0.2.0
+
+v0.3.0 owns its ledger table: drop `table` and `tableKeys` from `Metering` (passing `table` fails at synth). `authorize` and `record` don't change. Deploy, then sync prices to the ledger table (`prices-cli sync --table <ledger table>`).
 
 ## The old surface (Nieto's, until v0.3.0)
 
