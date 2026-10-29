@@ -73,9 +73,9 @@ describe('authorize', () => {
     });
     // Plain JSON: the hold survives a queue or a log line.
     expect(JSON.parse(JSON.stringify(hold))).toEqual(hold);
-    // The cap reads are consistent; the price is the version valid now.
+    // The cap reads are consistent; the price is the version valid now, from the SKU's versions (cached).
     expect(ddbMock.commandCalls(GetCommand).every((c) => c.args[0].input.ConsistentRead)).toBe(true);
-    expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input.ExpressionAttributeValues).toEqual({ ':pk': 'PRICING#claude-haiku-5-5', ':at': '2026-11-03T14:05:09Z' });
+    expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input.ExpressionAttributeValues).toEqual({ ':pk': 'PRICING#claude-haiku-5-5' });
   });
 
   test('every authorize mints a new callId', async () => {

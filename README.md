@@ -48,6 +48,9 @@ try {
 - **when the bytes bound crosses the SKU's first context tier**, count instead: the hold is priced at every tier `inputTokens` could reach, so 150,000 bytes of a 90,000-token prompt are held at Haiku's above-100k rates, five times the base. When the bytes are above the first tier's `aboveInputTokens`, pass the provider's own token count as `inputTokens` (Anthropic's count-tokens endpoint is free). The bound only has to hold; a counted bound under the threshold reserves at the base rate;
 - a malformed request (from untyped JavaScript) is refused with 500 `metering_unavailable` and alarms; `authorize` never throws;
 - returns `{ ok: true, tier, callId, hold }` (one fresh `callId` per attempt), or `{ ok: false, status, body, headers }`: `daily_limit_reached` (429, `resetsAt`), `too_many_requests` (429, `Retry-After`), `service_paused`, `pricing_not_configured`, `metering_unavailable` (503).
+- logs one info line per call, refusals included: `AUTHORIZE_TIMING` `{ appId, sku, outcome, readsMs, reserveMs, totalMs, attempts }` (`outcome` is `ok` or the refusal code; `readsMs` the parallel reads, `reserveMs` the reserve transaction with its resends, `attempts` how many times it was sent, 0 when refused before it).
+
+Each `FairMeter` caches a SKU's price versions for 5 minutes and picks the one valid at the call's time from them, so a warm instance doesn't query prices on every call. A SKU with no version isn't cached: one synced later is found on the next call.
 
 **`record(call, usage)`**, after the attempt, whatever happened. Settles the reservation exactly once:
 
@@ -95,6 +98,8 @@ metering.grant(fn); // IAM on the ledger table, the FAIR_METER env, an alarm on 
 
 It creates the ledger table, `metering.table` and a stack output: on-demand, `PK`/`SK`, TTL on `expiresAt`, point-in-time recovery, deletion protected and retained when the stack is deleted. Prices, counters, holds and the ledger live there, nothing of your app's; your `authorize` and `record` code needs no table settings. It also creates the retry queue and its Lambda (`MeteringRetry`, DLQ alarms on depth and on a 7-day-old message) and the sweeper: every 10 minutes it settles holds left open for 30 minutes (a crash between authorize and the settle) at their reservation, `estimated: 'swept'`, and alarms. Give `fn` its own `logGroup`. Optional: `alarmAction` (without it the alarms exist with no action, fine for dev), `allAppsDailyCapUsd`, `maxCallsPerMinute`, `tiers`. `billing: 'hosted'` is refused until the wallet exists.
 
+**The retry queue** (`MeteringRetry`, also under `Metering`): a record the app couldn't write waits on the queue and is retried every minute; one that still fails after 10 receives is parked in the DLQ. A message that can never be recorded (not JSON, no `appId`/`sub`/`requestId`/`requestTime`, or no transaction can be built from it) is parked at once, logged `USAGE_RECORD_PARKED` (an error that alarms under `Metering`). Every night at 04:00 UTC a redrive Lambda drains the DLQ: each valid record goes back on the retry queue, at most 3 times per call, counted on `REDRIVE#<app>` / `CALL#<callId>` (kept 30 days); recording is idempotent, so a record already in the ledger ends `duplicate`. Invalid records stay, and so does a call at its third redrive (logged `REDRIVE_LIMIT`), so the DLQ alarms stay on. The manual step when that happens: read the message in the SQS console, fix the cause (bad data, a missing price, a table permission), then redrive it from the console (not counted) or delete it if it must never be recorded; the DLQ drops it 14 days after its first enqueue.
+
 **Prices** live in this repo, `prices/<sku>.json`, one file per SKU: `provider`, `unit` (`tokens`, `chars`, `units`, `requests`) and immutable `versions`, each with `validFrom`, the rates in PRICING item fields (integer micro-USD) and the provider's pricing page as `source`. To put them in the ledger table (its name is the stack output):
 
 ```
@@ -102,7 +107,7 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts sync --table <ledger table> [-
 npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <name> [--keys pk,sk]
 ```
 
-`sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
+`sync` adds each version the table lacks, closing the previous version's range in the same transaction. A stored version with other values, or a new version older than one already stored, is refused and nothing is written: a price change is a new version with a new `validFrom`. A new version must start at least 10 minutes after `sync` runs (twice the 5-minute price cache, so no warm instance prices a call at the old version after the change); a SKU with no stored version may start at once. Seeded: `claude-haiku-5-5`, `deepseek-v4-flash` (DeepSeek's peak band can't skip Chinese public holidays, so those weekdays are reserved and charged at peak).
 
 **Action SKUs** are ordinary price files, `prices/<app>-<action>.json`, with `provider: "aws"` and `unit: "units"` (one unit is one action). Each version has `microUsdPerKUnits` and `components: { database, api, compute, logs, other }`, integer micro-USD per 1,000 actions; the parser requires exactly those five and their sum equal to `microUsdPerKUnits`, and `source` is the AWS Price List URL. They sync and price like any `units` SKU, and `price-history` shows the components. None is seeded yet: the first ones come from a measurement.
 
@@ -184,7 +189,8 @@ What it does:
   `outputTokens`, `reasoningTokens` (non-overlapping).
 - **Exactly-once recording** (`ledger.ts`): event + all counters in one DynamoDB transaction,
   conditional on a deterministic event key, plus an idempotency token. Failed writes go to an
-  SQS retry queue (`retry-handler.ts`, `cdk.ts`) with a dead-letter queue that alarms.
+  SQS retry queue (`retry-handler.ts`, `cdk.ts`) with a dead-letter queue that alarms and a
+  nightly redrive (`redrive-handler.ts`).
 - **Reports** (`report.ts`): flag parsing, plan updates and spend aggregation for an admin CLI.
 - **Adjustments** (`adjust.ts`): the correcting half of the cost ledger. EVENT items (charges)
   never change; a correction is an immutable `ADJUST#<event-time>#<app>#<id>` item with a signed

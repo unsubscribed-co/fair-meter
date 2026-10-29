@@ -17,6 +17,7 @@ test('a construct-bundled handler starts with "use strict"', () => {
   new MeteringRetry(s, 'Retry', { table, alarmAction });
   app.synth();
   const bundles = fs.readdirSync(outdir).filter((d) => d.startsWith('asset.')).map((d) => path.join(outdir, d, 'index.js'));
-  expect(bundles).toHaveLength(1);
-  expect(fs.readFileSync(bundles[0], 'utf8').startsWith('"use strict";')).toBe(true);
+  // The retry Lambda and the redrive.
+  expect(bundles).toHaveLength(2);
+  for (const b of bundles) expect(fs.readFileSync(b, 'utf8').startsWith('"use strict";')).toBe(true);
 }, 60_000);
