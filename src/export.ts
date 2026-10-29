@@ -53,6 +53,11 @@ export const EXPORT_COLUMNS: { name: string; type: 'string' | 'bigint' }[] = [
   ['newCostMicroUsd', 'bigint'],
   ['deltaMicroUsd', 'bigint'],
   ['createdAt', 'string'],
+  // v0.2.0, events (the end of the list, so earlier columns keep their places)
+  ['env', 'string'],
+  ['paidBy', 'string'], // credit | paid
+  ['estimated', 'string'], // aborted | no_usage | swept; absent = the provider's own usage
+  ['reservedMicroUsd', 'bigint'],
 ].map(([name, type]) => ({ name: name.toLowerCase(), type: type as 'string' | 'bigint' }));
 
 export type ExportRow = Record<string, string | number>;
@@ -118,6 +123,10 @@ export function exportRow(item: Record<string, any>, legacyAppId: string): Expor
         baseCostMicroUsd: num(item.baseCostMicroUsd),
         costMicroUsd: num(item.costMicroUsd),
         markupBps: num(item.markupBps),
+        env: str(item.env),
+        paidBy: str(item.paidBy),
+        estimated: str(item.estimated),
+        reservedMicroUsd: num(item.reservedMicroUsd),
       }),
     };
   }

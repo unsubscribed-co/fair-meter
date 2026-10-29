@@ -15,8 +15,11 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { assertTierThresholds, type TierThresholds } from './budget';
+import { usdToMicroUsd } from './cost';
 import { EXPORT_COLUMNS, streamFilterPattern } from './export';
-import { DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
+import type { FairMeterConfig } from './fair-meter';
+import { assertAppId, DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
 import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
 
 // esbuild skips tsconfig files inside node_modules, so name ours or the handlers lose "use strict" in an app's bundle.
@@ -96,6 +99,16 @@ export class MeteringRetry extends Construct {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     parked.addAlarmAction(props.alarmAction);
+    // The DLQ drops a message 14 days after its first enqueue: this leaves a week to redrive it (M3).
+    const ageing = new cloudwatch.Alarm(this, 'DlqAgeAlarm', {
+      alarmDescription: 'A usage record has waited 7 days in the metering DLQ; it is dropped at 14: fix, then redrive',
+      metric: this.deadLetterQueue.metricApproximateAgeOfOldestMessage({ period: cdk.Duration.hours(1), statistic: 'Maximum' }),
+      threshold: cdk.Duration.days(7).toSeconds(),
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    ageing.addAlarmAction(props.alarmAction);
   }
 
   /** Lets an app's proxy defer records to the queue. Returns the env var value it needs. */
@@ -524,5 +537,141 @@ export class FreeTierWatch extends Construct {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     for (const alarm of [this.alarm, ...full, failed]) alarm.addAlarmAction(props.alarmAction);
+  }
+}
+
+export interface MeteringProps extends TableKeysProps {
+  table: dynamodb.ITable;
+  /** Which app ("stacksplit"); prefixes its counters, events and pending rows. */
+  appId: string;
+  /** Which deployment ("prod" | "dev"), written on every EVENT. */
+  env: string;
+  /** Where alarms go (e.g. an SNS action). */
+  alarmAction: cloudwatch.IAlarmAction;
+  /** Per person per UTC day, decimal USD ("0.50"), parsed exactly at synth. Reserved atomically. */
+  dailyCapUsd: string;
+  /** Everyone in this app per UTC day, decimal USD: a soft breaker. */
+  appDailyCapUsd: string;
+  /** Every app in the table per UTC day, decimal USD: a soft breaker. */
+  allAppsDailyCapUsd?: string;
+  /** Calls per person per UTC minute (a brake against loops). Needs the table's TTL on `expiresAt`. */
+  maxCallsPerMinute?: number;
+  tiers?: TierThresholds;
+  /** 'hosted' needs the wallet, which doesn't exist yet: refused at synth. */
+  billing?: 'none' | 'hosted';
+}
+
+/** Log terms that mean money may be wrong or calls are refused; each alarms within 5 minutes. */
+const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED'];
+
+/**
+ * FairMeter's infrastructure, from one config: the retry queue (MeteringRetry), the sweeper that
+ * settles holds nobody settled, and their alarms. `grant(fn)` lets an app function use
+ * `new FairMeter()`: IAM on the table and queue, the FAIR_METER env, and an alarm on its
+ * metering error lines.
+ */
+export class Metering extends Construct {
+  readonly retry: MeteringRetry;
+  readonly sweeper: lambdaNode.NodejsFunction;
+  /** FairMeterConfig as the app reads it (table name and queue URL are CloudFormation tokens). */
+  readonly config: FairMeterConfig;
+  private readonly table: dynamodb.ITable;
+  private readonly errors: cloudwatch.Metric;
+  private grants = 0;
+
+  constructor(scope: Construct, id: string, props: MeteringProps) {
+    super(scope, id);
+    assertAppId(props.appId);
+    if (props.billing === 'hosted') throw new Error("Metering: billing 'hosted' needs the wallet, which v0.2.0 doesn't have");
+    const cap = (name: string, usd: string) => {
+      const micro = usdToMicroUsd(usd);
+      if (micro <= 0) throw new Error(`Metering: ${name} must be above 0`);
+      return micro;
+    };
+    const dailyCapMicroUsd = cap('dailyCapUsd', props.dailyCapUsd);
+    const appDailyCapMicroUsd = cap('appDailyCapUsd', props.appDailyCapUsd);
+    if (dailyCapMicroUsd > appDailyCapMicroUsd) throw new Error('Metering: dailyCapUsd is above appDailyCapUsd');
+    if (props.maxCallsPerMinute !== undefined && !(Number.isSafeInteger(props.maxCallsPerMinute) && props.maxCallsPerMinute > 0)) {
+      throw new Error('Metering: maxCallsPerMinute must be a positive integer');
+    }
+    if (props.tiers) assertTierThresholds(props.tiers);
+    this.table = props.table;
+
+    this.retry = new MeteringRetry(this, 'Retry', { table: props.table, alarmAction: props.alarmAction, tableKeys: props.tableKeys });
+    // FairMeter records: a refused settle reads the EVENT, and a settle deletes the PENDING row.
+    props.table.grant(this.retry.fn, 'dynamodb:GetItem', 'dynamodb:DeleteItem');
+    this.config = {
+      appId: props.appId,
+      env: props.env,
+      tableName: props.table.tableName,
+      retryQueueUrl: this.retry.queue.queueUrl,
+      dailyCapMicroUsd,
+      appDailyCapMicroUsd,
+      ...(props.allAppsDailyCapUsd !== undefined ? { allAppsDailyCapMicroUsd: cap('allAppsDailyCapUsd', props.allAppsDailyCapUsd) } : {}),
+      ...(props.maxCallsPerMinute !== undefined ? { maxCallsPerMinute: props.maxCallsPerMinute } : {}),
+      ...(props.tiers ? { tiers: props.tiers } : {}),
+      ...(props.tableKeys ? { tableKeys: props.tableKeys } : {}),
+    };
+
+    const sweeperLogs = new logs.LogGroup(this, 'SweeperLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.DESTROY });
+    this.sweeper = new lambdaNode.NodejsFunction(this, 'Sweeper', {
+      entry: path.join(__dirname, 'sweep-handler.ts'),
+      runtime: lambda.Runtime.NODEJS_24_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(60),
+      environment: { FAIR_METER: cdk.Stack.of(this).toJsonString(this.config), NODE_OPTIONS: '--enable-source-maps' },
+      logGroup: sweeperLogs,
+      loggingFormat: lambda.LoggingFormat.JSON,
+      bundling: BUNDLING,
+    });
+    props.table.grant(this.sweeper, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
+    new events.Rule(this, 'SweeperSchedule', {
+      description: `Settle ${props.appId} reservations left open for 30 minutes`,
+      schedule: events.Schedule.rate(cdk.Duration.minutes(10)),
+      targets: [new eventsTargets.LambdaFunction(this.sweeper, { retryAttempts: 2 })],
+    });
+
+    const namespace = 'FairMeter';
+    const swept = new logs.MetricFilter(this, 'SweptFilter', {
+      logGroup: sweeperLogs,
+      filterPattern: logs.FilterPattern.anyTerm('SETTLED_BY_SWEEPER'),
+      metricNamespace: namespace,
+      metricName: `${props.appId}-${props.env}-SettledBySweeper`,
+      metricValue: '1',
+    });
+    this.errors = new cloudwatch.Metric({ namespace, metricName: `${props.appId}-${props.env}-MeteringErrors`, statistic: 'Sum', period: cdk.Duration.minutes(5) });
+    const alarm = (alarmId: string, alarmDescription: string, metric: cloudwatch.IMetric) =>
+      new cloudwatch.Alarm(this, alarmId, {
+        alarmDescription,
+        metric,
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(props.alarmAction);
+    const where = `${props.appId} ${props.env}`;
+    alarm('SweptAlarm', `${where}: the sweeper settled a call at its reservation (a crash or a missing record): check SETTLED_BY_SWEEPER in its logs`,
+      swept.metric({ statistic: 'Sum', period: cdk.Duration.minutes(10) }));
+    alarm('SweeperFailureAlarm', `${where}: the metering sweeper failed; open reservations stay held until it runs: check its logs`,
+      this.sweeper.metricErrors({ period: cdk.Duration.minutes(10) }));
+    alarm('ErrorsAlarm', `${where}: a metering error (${METERING_ERRORS.join(', ')}): check the app function's logs`, this.errors);
+  }
+
+  /**
+   * Lets `fn` run `new FairMeter()`. Give `fn` its own `logGroup`: reading `fn.logGroup` otherwise
+   * makes CDK add its log-retention custom resource.
+   */
+  grant(fn: lambda.Function): void {
+    this.table.grant(fn, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
+    this.retry.queue.grantSendMessages(fn);
+    fn.addEnvironment('FAIR_METER', cdk.Stack.of(this).toJsonString(this.config));
+    new logs.MetricFilter(this, `Errors${this.grants++}`, {
+      logGroup: fn.logGroup,
+      filterPattern: logs.FilterPattern.anyTerm(...METERING_ERRORS),
+      metricNamespace: this.errors.namespace,
+      metricName: this.errors.metricName,
+      metricValue: '1',
+    });
   }
 }
