@@ -27,6 +27,24 @@ import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
 // esbuild skips tsconfig files inside node_modules, so name ours or the handlers lose "use strict" in an app's bundle.
 const BUNDLING = { minify: true, sourceMap: true, tsconfig: path.join(__dirname, '..', 'tsconfig.json') };
 
+/** One of the metering Lambdas (retry, redrive, sweeper, rollup): Node 24 on ARM, 256 MB, JSON logs kept a month in `logGroup`. */
+function meteringFunction(scope: Construct, id: string, o: { handler: string; timeout: cdk.Duration; environment: Record<string, string>; logGroup: logs.ILogGroup }) {
+  return new lambdaNode.NodejsFunction(scope, id, {
+    entry: path.join(__dirname, o.handler),
+    runtime: lambda.Runtime.NODEJS_24_X,
+    architecture: lambda.Architecture.ARM_64,
+    memorySize: 256,
+    timeout: o.timeout,
+    environment: { ...o.environment, NODE_OPTIONS: '--enable-source-maps' },
+    logGroup: o.logGroup,
+    loggingFormat: lambda.LoggingFormat.JSON,
+    bundling: BUNDLING,
+  });
+}
+
+/** A metering Lambda's log group: a month, deleted with the stack. */
+const monthOfLogs = (scope: Construct, id: string) => new logs.LogGroup(scope, id, { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.DESTROY });
+
 /** Every construct takes the table's key names when they aren't the defaults (keys.ts). */
 interface TableKeysProps {
   /** e.g. `{ pk: 'pk', sk: 'sk' }`; omitted = PK / SK / USER#<sub>. Must match the app's `setTableKeys`. */
@@ -76,19 +94,11 @@ export class MeteringRetry extends Construct {
       deadLetterQueue: { queue: this.deadLetterQueue, maxReceiveCount: 10 },
     });
 
-    this.fn = new lambdaNode.NodejsFunction(this, 'Fn', {
-      entry: path.join(__dirname, 'retry-handler.ts'),
-      runtime: lambda.Runtime.NODEJS_24_X,
-      architecture: lambda.Architecture.ARM_64,
-      memorySize: 256,
+    this.fn = meteringFunction(this, 'Fn', {
+      handler: 'retry-handler.ts',
       timeout: cdk.Duration.seconds(10),
-      environment: { TABLE_NAME: props.table.tableName, DLQ_URL: this.deadLetterQueue.queueUrl, ...tableKeysEnv(props.tableKeys), NODE_OPTIONS: '--enable-source-maps' },
-      logGroup: new logs.LogGroup(this, 'Logs', {
-        retention: logs.RetentionDays.ONE_MONTH,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-      loggingFormat: lambda.LoggingFormat.JSON,
-      bundling: BUNDLING,
+      environment: { TABLE_NAME: props.table.tableName, DLQ_URL: this.deadLetterQueue.queueUrl, ...tableKeysEnv(props.tableKeys) },
+      logGroup: monthOfLogs(this, 'Logs'),
     });
     // The usage transaction: one conditional Put plus Updates.
     props.table.grant(this.fn, 'dynamodb:PutItem', 'dynamodb:UpdateItem');
@@ -96,23 +106,12 @@ export class MeteringRetry extends Construct {
     // A message that can never be recorded is parked at once.
     this.deadLetterQueue.grantSendMessages(this.fn);
 
-    this.redrive = new lambdaNode.NodejsFunction(this, 'Redrive', {
-      entry: path.join(__dirname, 'redrive-handler.ts'),
-      runtime: lambda.Runtime.NODEJS_24_X,
-      architecture: lambda.Architecture.ARM_64,
-      memorySize: 256,
+    this.redrive = meteringFunction(this, 'Redrive', {
+      handler: 'redrive-handler.ts',
       // Below the redrive's receive visibility (6 minutes), so no message is seen twice in one run.
       timeout: cdk.Duration.minutes(5),
-      environment: {
-        TABLE_NAME: props.table.tableName, QUEUE_URL: this.queue.queueUrl, DLQ_URL: this.deadLetterQueue.queueUrl,
-        ...tableKeysEnv(props.tableKeys), NODE_OPTIONS: '--enable-source-maps',
-      },
-      logGroup: new logs.LogGroup(this, 'RedriveLogs', {
-        retention: logs.RetentionDays.ONE_MONTH,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-      loggingFormat: lambda.LoggingFormat.JSON,
-      bundling: BUNDLING,
+      environment: { TABLE_NAME: props.table.tableName, QUEUE_URL: this.queue.queueUrl, DLQ_URL: this.deadLetterQueue.queueUrl, ...tableKeysEnv(props.tableKeys) },
+      logGroup: monthOfLogs(this, 'RedriveLogs'),
     });
     // The redrive count (REDRIVE#<app> / CALL#<callId>).
     props.table.grant(this.redrive, 'dynamodb:UpdateItem');
@@ -692,17 +691,12 @@ export class Metering extends Construct {
       ...(actions ? { actions, actionFloorMicroUsd } : {}),
     };
 
-    const sweeperLogs = new logs.LogGroup(this, 'SweeperLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.DESTROY });
-    this.sweeper = new lambdaNode.NodejsFunction(this, 'Sweeper', {
-      entry: path.join(__dirname, 'sweep-handler.ts'),
-      runtime: lambda.Runtime.NODEJS_24_X,
-      architecture: lambda.Architecture.ARM_64,
-      memorySize: 256,
+    const sweeperLogs = monthOfLogs(this, 'SweeperLogs');
+    this.sweeper = meteringFunction(this, 'Sweeper', {
+      handler: 'sweep-handler.ts',
       timeout: cdk.Duration.seconds(60),
-      environment: { FAIR_METER: cdk.Stack.of(this).toJsonString(this.config), NODE_OPTIONS: '--enable-source-maps' },
+      environment: { FAIR_METER: cdk.Stack.of(this).toJsonString(this.config) },
       logGroup: sweeperLogs,
-      loggingFormat: lambda.LoggingFormat.JSON,
-      bundling: BUNDLING,
     });
     this.table.grant(this.sweeper, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
     new events.Rule(this, 'SweeperSchedule', {
@@ -741,21 +735,15 @@ export class Metering extends Construct {
     this.watchErrors(this.retry.redrive);
     let errors: cloudwatch.IMetric = this.errors;
     if (actions) {
-      const rollup = new lambdaNode.NodejsFunction(this, 'Rollup', {
-        entry: path.join(__dirname, 'rollup-handler.ts'),
-        runtime: lambda.Runtime.NODEJS_24_X,
-        architecture: lambda.Architecture.ARM_64,
-        memorySize: 256,
+      const rollup = meteringFunction(this, 'Rollup', {
+        handler: 'rollup-handler.ts',
         // Up to 8 windows, one Logs Insights query each; well inside the 15 minutes between runs.
         timeout: cdk.Duration.minutes(5),
         environment: {
           FAIR_METER: cdk.Stack.of(this).toJsonString(this.config),
           LOG_GROUPS: cdk.Lazy.string({ produce: () => cdk.Fn.join(',', this.logGroups) }),
-          NODE_OPTIONS: '--enable-source-maps',
         },
-        logGroup: new logs.LogGroup(this, 'RollupLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-        loggingFormat: lambda.LoggingFormat.JSON,
-        bundling: BUNDLING,
+        logGroup: monthOfLogs(this, 'RollupLogs'),
       });
       // Prices, the cursor and the usage transaction. StartQuery is granted per log group in grant().
       this.table.grant(rollup, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem');
