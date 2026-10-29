@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib/core';
 import * as athena from 'aws-cdk-lib/aws-athena';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
-import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as glue from 'aws-cdk-lib/aws-glue';
@@ -36,8 +36,8 @@ const tableKeysEnv = (k?: Partial<TableKeys>): Record<string, string> => (k ? { 
 
 export interface MeteringRetryProps extends TableKeysProps {
   table: dynamodb.ITable;
-  /** Where alarms go (e.g. an SNS action). */
-  alarmAction: cloudwatch.IAlarmAction;
+  /** Where alarms go (e.g. an SNS action); omitted, the alarms exist with no action. */
+  alarmAction?: cloudwatch.IAlarmAction;
 }
 
 /**
@@ -98,7 +98,7 @@ export class MeteringRetry extends Construct {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    parked.addAlarmAction(props.alarmAction);
+    if (props.alarmAction) parked.addAlarmAction(props.alarmAction);
     // The DLQ drops a message 14 days after its first enqueue: this leaves a week to redrive it (M3).
     const ageing = new cloudwatch.Alarm(this, 'DlqAgeAlarm', {
       alarmDescription: 'A usage record has waited 7 days in the metering DLQ; it is dropped at 14: fix, then redrive',
@@ -108,7 +108,7 @@ export class MeteringRetry extends Construct {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    ageing.addAlarmAction(props.alarmAction);
+    if (props.alarmAction) ageing.addAlarmAction(props.alarmAction);
   }
 
   /** Lets an app's proxy defer records to the queue. Returns the env var value it needs. */
@@ -540,21 +540,20 @@ export class FreeTierWatch extends Construct {
   }
 }
 
-export interface MeteringProps extends TableKeysProps {
-  table: dynamodb.ITable;
+export interface MeteringProps {
   /** Which app ("stacksplit"); prefixes its counters, events and pending rows. */
   appId: string;
   /** Which deployment ("prod" | "dev"), written on every EVENT. */
   env: string;
-  /** Where alarms go (e.g. an SNS action). */
-  alarmAction: cloudwatch.IAlarmAction;
+  /** Where alarms go (e.g. an SNS action); omitted, the alarms exist with no action. */
+  alarmAction?: cloudwatch.IAlarmAction;
   /** Per person per UTC day, decimal USD ("0.50"), parsed exactly at synth. Reserved atomically. */
   dailyCapUsd: string;
   /** Everyone in this app per UTC day, decimal USD: a soft breaker. */
   appDailyCapUsd: string;
   /** Every app in the table per UTC day, decimal USD: a soft breaker. */
   allAppsDailyCapUsd?: string;
-  /** Calls per person per UTC minute (a brake against loops). Needs the table's TTL on `expiresAt`. */
+  /** Calls per person per UTC minute (a brake against loops). */
   maxCallsPerMinute?: number;
   tiers?: TierThresholds;
   /** 'hosted' needs the wallet, which doesn't exist yet: refused at synth. */
@@ -566,21 +565,24 @@ const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED',
 
 /**
  * FairMeter's infrastructure, from one config: the retry queue (MeteringRetry), the sweeper that
- * settles holds nobody settled, and their alarms. `grant(fn)` lets an app function use
- * `new FairMeter()`: IAM on the table and queue, the FAIR_METER env, and an alarm on its
- * metering error lines.
+ * settles holds nobody settled, and their alarms, all writing to the ledger table it owns.
+ * `grant(fn)` lets an app function use `new FairMeter()`: IAM on the ledger table and queue, the
+ * FAIR_METER env, and an alarm on its metering error lines.
  */
 export class Metering extends Construct {
+  /** The ledger table: prices, counters, holds and the ledger, nothing of the app's. */
+  readonly table: dynamodb.Table;
   readonly retry: MeteringRetry;
   readonly sweeper: lambdaNode.NodejsFunction;
   /** FairMeterConfig as the app reads it (table name and queue URL are CloudFormation tokens). */
   readonly config: FairMeterConfig;
-  private readonly table: dynamodb.ITable;
   private readonly errors: cloudwatch.Metric;
   private grants = 0;
 
   constructor(scope: Construct, id: string, props: MeteringProps) {
     super(scope, id);
+    // Untyped callers still passing v0.2.0's prop would otherwise write to a table nobody reads.
+    if ((props as { table?: unknown }).table) throw new Error('Metering: v0.3.0 owns its ledger table: see Upgrading in the README');
     assertAppId(props.appId);
     if (props.billing === 'hosted') throw new Error("Metering: billing 'hosted' needs the wallet, which v0.2.0 doesn't have");
     const cap = (name: string, usd: string) => {
@@ -595,22 +597,31 @@ export class Metering extends Construct {
       throw new Error('Metering: maxCallsPerMinute must be a positive integer');
     }
     if (props.tiers) assertTierThresholds(props.tiers);
-    this.table = props.table;
+    // Money records live here: never deleted with the stack, restorable to any second of the last 35 days.
+    this.table = new dynamodb.Table(this, 'Ledger', {
+      partitionKey: { name: DEFAULT_TABLE_KEYS.pk, type: dynamodb.AttributeType.STRING },
+      sortKey: { name: DEFAULT_TABLE_KEYS.sk, type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: 'expiresAt',
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      deletionProtection: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    new cdk.CfnOutput(this, 'LedgerTableName', { value: this.table.tableName, description: `${props.appId} ${props.env} metering ledger table (prices-cli sync --table)` });
 
-    this.retry = new MeteringRetry(this, 'Retry', { table: props.table, alarmAction: props.alarmAction, tableKeys: props.tableKeys });
+    this.retry = new MeteringRetry(this, 'Retry', { table: this.table, alarmAction: props.alarmAction });
     // FairMeter records: a refused settle reads the EVENT, and a settle deletes the PENDING row.
-    props.table.grant(this.retry.fn, 'dynamodb:GetItem', 'dynamodb:DeleteItem');
+    this.table.grant(this.retry.fn, 'dynamodb:GetItem', 'dynamodb:DeleteItem');
     this.config = {
       appId: props.appId,
       env: props.env,
-      tableName: props.table.tableName,
+      tableName: this.table.tableName,
       retryQueueUrl: this.retry.queue.queueUrl,
       dailyCapMicroUsd,
       appDailyCapMicroUsd,
       ...(props.allAppsDailyCapUsd !== undefined ? { allAppsDailyCapMicroUsd: cap('allAppsDailyCapUsd', props.allAppsDailyCapUsd) } : {}),
       ...(props.maxCallsPerMinute !== undefined ? { maxCallsPerMinute: props.maxCallsPerMinute } : {}),
       ...(props.tiers ? { tiers: props.tiers } : {}),
-      ...(props.tableKeys ? { tableKeys: props.tableKeys } : {}),
     };
 
     const sweeperLogs = new logs.LogGroup(this, 'SweeperLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.DESTROY });
@@ -625,7 +636,7 @@ export class Metering extends Construct {
       loggingFormat: lambda.LoggingFormat.JSON,
       bundling: BUNDLING,
     });
-    props.table.grant(this.sweeper, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
+    this.table.grant(this.sweeper, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
     new events.Rule(this, 'SweeperSchedule', {
       description: `Settle ${props.appId} reservations left open for 30 minutes`,
       schedule: events.Schedule.rate(cdk.Duration.minutes(10)),
@@ -641,15 +652,17 @@ export class Metering extends Construct {
       metricValue: '1',
     });
     this.errors = new cloudwatch.Metric({ namespace, metricName: `${props.appId}-${props.env}-MeteringErrors`, statistic: 'Sum', period: cdk.Duration.minutes(5) });
-    const alarm = (alarmId: string, alarmDescription: string, metric: cloudwatch.IMetric) =>
-      new cloudwatch.Alarm(this, alarmId, {
+    const alarm = (alarmId: string, alarmDescription: string, metric: cloudwatch.IMetric) => {
+      const a = new cloudwatch.Alarm(this, alarmId, {
         alarmDescription,
         metric,
         threshold: 1,
         evaluationPeriods: 1,
         comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      }).addAlarmAction(props.alarmAction);
+      });
+      if (props.alarmAction) a.addAlarmAction(props.alarmAction);
+    };
     const where = `${props.appId} ${props.env}`;
     alarm('SweptAlarm', `${where}: the sweeper settled a call at its reservation (a crash or a missing record): check SETTLED_BY_SWEEPER in its logs`,
       swept.metric({ statistic: 'Sum', period: cdk.Duration.minutes(10) }));
