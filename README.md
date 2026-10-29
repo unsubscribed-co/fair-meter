@@ -46,13 +46,15 @@ try {
 
 **`record(call, usage)`**, after the attempt, whatever happened. Settles the reservation exactly once:
 
-| `usage` | When | Settled at |
-|---|---|---|
-| the provider's usage block | it answered | the actual cost (the price's provider picks the adapter) |
-| `{ estimate: <usage block> }` | the app aborted it but can guess (a hedge loser's input tokens) | that estimate, `estimated: 'aborted'`, no alarm |
-| `'unknown'` | aborted or lost with no guess (timeout, network error after sending) | the reservation, `estimated: 'aborted'`, no alarm |
-| `'not_billed'` | an error status the provider doesn't bill (4xx, 5xx, 429) | nothing: the hold is released, no EVENT |
-| `undefined` or malformed | a 200 without usable usage | the reservation, `estimated: 'no_usage'`, USAGE_MISSING alarms |
+| `usage` | When | Settled at | Who pays |
+|---|---|---|---|
+| the provider's usage block | it answered | the actual cost (the price's provider picks the adapter) | the person |
+| `{ estimate: <usage block> }` | the app aborted it but can guess (a hedge loser's input tokens) | that estimate, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
+| `'unknown'` | aborted or lost with no guess (timeout, network error after sending) | the reservation, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
+| `'not_billed'` | an error status the provider doesn't bill (4xx, 5xx, 429) | nothing: the hold is released, no EVENT | nobody |
+| `undefined` or malformed | a 200 without usable usage | the reservation, `estimated: 'no_usage'`, USAGE_MISSING alarms | the person (they were served) |
+
+An absorbed attempt keeps its list-price cost and counts toward the cap, but the EVENT and the person's day and month rows carry `absorbedMicroUsd`: the person is charged `costMicroUsd − absorbedMicroUsd`. The sweeper's settles are absorbed too. A late true-up of a swept attempt moves it: real usage charges the person its real cost, a late `'not_billed'` leaves them at $0.
 
 Outcomes: `recorded`, `duplicate`, `trued_up` (real usage after the sweeper's estimate, written as an ADJUST), `conflict` (another payload for a settled call: refused, RECORD_CONFLICT alarms), `deferred` (queued), `failed` (queue down too: USAGE_RECORD_FAILED; the sweeper still settles the hold). A cost above the reservation is recorded as it is and logs RESERVATION_EXCEEDED, which alarms: it is the only sign that `max` didn't bound the call and the cap was overshot.
 

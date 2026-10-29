@@ -2,7 +2,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { holdRecord, type FairMeterConfig, type HoldFacts } from './fair-meter';
 import { setTableKeys, skOf, tableKeys } from './keys';
-import { recordUsage } from './ledger';
+import { absorbedOf, recordUsage } from './ledger';
 
 /**
  * Settles reservations nobody settled: the app's Lambda died between authorize and the settle
@@ -35,7 +35,7 @@ export async function sweep(ddb: DynamoDBDocumentClient, cfg: Pick<FairMeterConf
       try {
         const record = holdRecord({ appId: cfg.appId, env: String(row.env ?? cfg.env), callId, hold: row as HoldFacts }, 'swept');
         const outcome = await recordUsage(ddb, cfg.tableName, record);
-        const facts = { appId: cfg.appId, callId, person: row.person, sku: row.sku, at: row.at, reservedMicroUsd: row.reservedMicroUsd, outcome };
+        const facts = { appId: cfg.appId, callId, person: row.person, sku: row.sku, at: row.at, reservedMicroUsd: row.reservedMicroUsd, absorbedMicroUsd: absorbedOf(record), outcome };
         if (outcome === 'recorded') {
           console.error('SETTLED_BY_SWEEPER', facts);
           settled++;

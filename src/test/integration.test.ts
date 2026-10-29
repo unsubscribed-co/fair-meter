@@ -39,6 +39,9 @@ const pendingOf = async (person: string) =>
   ((await ddb.send(new QueryCommand({ TableName: TABLE, KeyConditionExpression: 'pk = :pk', ExpressionAttributeValues: { ':pk': 'PENDING#stacksplit' }, ConsistentRead: true }))).Items ?? [])
     .filter((p) => p.person === person);
 const events = async (person: string) => (await ledger(person)).filter((i) => String(i.sk).startsWith('EVENT#'));
+const month = (person: string) => get(`USER#${person}`, 'USAGE#stacksplit#2026-11');
+/** What the person is charged on a row: list-price cost minus what the operator absorbed. */
+const charged = (row?: Record<string, any>) => Number(row?.costMicroUsd ?? 0) - Number(row?.absorbedMicroUsd ?? 0);
 
 suite('★ FairMeter against DynamoDB Local', () => {
   beforeAll(async () => {
@@ -76,6 +79,10 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect(await day('a@x.co')).toMatchObject({ committedMicroUsd: 440, costMicroUsd: 440, requests: 1, inputTokens: 1000 });
     expect(await events('a@x.co')).toEqual([expect.objectContaining({ costMicroUsd: 440, reservedMicroUsd: RESERVED, paidBy: 'credit', env: 'prod' })]);
     expect(await get('PROVIDER#anthropic', 'DAILY#2026-11-03')).toMatchObject({ baseCostMicroUsd: 440 });
+    // Real usage: the person pays it all.
+    expect((await events('a@x.co'))[0]).not.toHaveProperty('absorbedMicroUsd');
+    expect(charged(await day('a@x.co'))).toBe(440);
+    expect(charged(await month('a@x.co'))).toBe(440);
   });
 
   test('T1: a crash between reserve and settle: nothing at +29 min, swept at +31', async () => {
@@ -93,8 +100,33 @@ suite('★ FairMeter against DynamoDB Local', () => {
     // Again: within 10 minutes DynamoDB's token makes it a silent success, after that the ADJUST key refuses it.
     expect(['trued_up', 'duplicate']).toContain(await meter().record(call, usage));
     const adjustments = (await ledger('t1@x.co')).filter((i) => String(i.sk).startsWith('ADJUST#'));
-    expect(adjustments).toEqual([expect.objectContaining({ reason: 'late-usage', deltaMicroUsd: 440 - RESERVED })]);
+    expect(adjustments).toEqual([expect.objectContaining({ reason: 'late-usage', deltaMicroUsd: 440 - RESERVED, absorbedMicroUsd: -RESERVED })]);
     expect(await day('t1@x.co')).toMatchObject({ costMicroUsd: 440, committedMicroUsd: RESERVED });
+    // The attempt served the person after all: they pay its real cost.
+    expect(charged(await day('t1@x.co'))).toBe(440);
+    expect(charged(await month('t1@x.co'))).toBe(440);
+  });
+
+  test("absorbed: a late 'not_billed' after a sweep leaves the person at $0", async () => {
+    const call = (await meter().authorize(ask('ab-nb@x.co'))) as Reservation;
+    await sweep(ddb, config, new Date(clock.getTime() + 31 * 60_000));
+    expect(await meter().record(call, 'not_billed')).toBe('trued_up');
+    const adjustments = (await ledger('ab-nb@x.co')).filter((i) => String(i.sk).startsWith('ADJUST#'));
+    expect(adjustments).toEqual([expect.objectContaining({ deltaMicroUsd: -RESERVED, absorbedMicroUsd: -RESERVED })]);
+    expect(await day('ab-nb@x.co')).toMatchObject({ costMicroUsd: 0, absorbedMicroUsd: 0 });
+    expect(charged(await day('ab-nb@x.co'))).toBe(0);
+    expect(charged(await month('ab-nb@x.co'))).toBe(0);
+  });
+
+  test('absorbed: a swept attempt counts toward the cap at list price, the person pays $0', async () => {
+    const call = (await meter().authorize(ask('ab-sweep@x.co'))) as Reservation;
+    await sweep(ddb, config, new Date(clock.getTime() + 31 * 60_000));
+    expect(await events('ab-sweep@x.co')).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, absorbedMicroUsd: RESERVED })]);
+    expect(await day('ab-sweep@x.co')).toMatchObject({ committedMicroUsd: RESERVED, costMicroUsd: RESERVED });
+    expect(charged(await day('ab-sweep@x.co'))).toBe(0);
+    expect(charged(await month('ab-sweep@x.co'))).toBe(0);
+    expect(await get('APP#stacksplit', 'DAILY#2026-11-03')).not.toHaveProperty('absorbedMicroUsd');
+    expect(console.error).toHaveBeenCalledWith('SETTLED_BY_SWEEPER', expect.objectContaining({ callId: call.callId, absorbedMicroUsd: RESERVED }));
   });
 
   test('T2: the same usage twice: counters added once', async () => {
@@ -128,21 +160,30 @@ suite('★ FairMeter against DynamoDB Local', () => {
     const call = (await meter().authorize(ask(person))) as Reservation;
     expect(await meter().record(call, given)).toBe('recorded');
     expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, estimated: 'no_usage' })]);
+    // A 200 without usage served the person: not absorbed.
+    expect((await events(person))[0]).not.toHaveProperty('absorbedMicroUsd');
+    expect(charged(await day(person))).toBe(RESERVED);
     expect(console.error).toHaveBeenCalledWith('USAGE_MISSING', expect.anything());
   });
 
   test("T7: 'unknown': aborted, at the reservation, no error log", async () => {
     const call = (await meter().authorize(ask('t7@x.co'))) as Reservation;
     expect(await meter().record(call, 'unknown')).toBe('recorded');
-    expect(await events('t7@x.co')).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, estimated: 'aborted' })]);
+    expect(await events('t7@x.co')).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, estimated: 'aborted', absorbedMicroUsd: RESERVED })]);
     expect(console.error).not.toHaveBeenCalled();
+    // Counted toward the cap at the reservation; the operator absorbs it.
+    expect(await day('t7@x.co')).toMatchObject({ committedMicroUsd: RESERVED, costMicroUsd: RESERVED });
+    expect(charged(await day('t7@x.co'))).toBe(0);
+    expect(charged(await month('t7@x.co'))).toBe(0);
   });
 
   test("{ estimate }: aborted at the app's estimate; committed released down to it", async () => {
     const call = (await meter().authorize(ask('est@x.co'))) as Reservation;
     expect(await meter().record(call, { estimate: { input_tokens: 7_000, output_tokens: 0 } })).toBe('recorded');
-    expect(await events('est@x.co')).toEqual([expect.objectContaining({ costMicroUsd: 700, estimated: 'aborted' })]);
-    expect(await day('est@x.co')).toMatchObject({ committedMicroUsd: 700 });
+    expect(await events('est@x.co')).toEqual([expect.objectContaining({ costMicroUsd: 700, estimated: 'aborted', absorbedMicroUsd: 700 })]);
+    expect(await day('est@x.co')).toMatchObject({ committedMicroUsd: 700, costMicroUsd: 700 });
+    expect(charged(await day('est@x.co'))).toBe(0);
+    expect(charged(await month('est@x.co'))).toBe(0);
   });
 
   test("T8: 'not_billed': no EVENT, PENDING gone, committed back where it was", async () => {
