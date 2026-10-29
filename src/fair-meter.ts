@@ -4,7 +4,7 @@ import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { assertTierThresholds, budgetTier, DEFAULT_TIER_THRESHOLDS, type BudgetTier, type TierThresholds } from './budget';
 import type { Meters } from './cost';
-import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, setTableKeys, skOf, tableKeys, utcDay, utcMonth, type TableKeys } from './keys';
+import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, setTableKeys, skOf, tableKeys, utcDay, utcMinute, utcMonth, type TableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
 import { Meter } from './meter';
 import { priceCall, priceShape, pricingTime, reserveCost, versionCovers, type CallUsage, type PriceShape } from './pricing';
@@ -42,6 +42,10 @@ export interface FairMeterConfig {
   billing?: 'none' | 'hosted';
   /** The table's key names when they aren't PK/SK (StackSplit: pk/sk). */
   tableKeys?: Partial<TableKeys>;
+  /** The app's action SKUs and the limits the floor is computed from (Metering's `actions`). Absent: no actions. */
+  actions?: { skus: string[]; perPersonPerMinute: number; maxConcurrency: number };
+  /** The floor, computed at synth (micro-USD): the room under the daily cap that AI holds can't use. Required with `actions`. */
+  actionFloorMicroUsd?: number;
 }
 
 export type Max = { inputTokens: number; outputTokens: number } | { chars: number } | { units: number } | { requests: number };
@@ -101,6 +105,8 @@ export interface PersonUsage {
   day: { spentMicroUsd: number; heldMicroUsd: number; capMicroUsd: number; roomMicroUsd: number; resetsAt: string };
   month: { spentMicroUsd: number; resetsAt: string };
   tier: BudgetTier;
+  /** Actions configured and committed above cap - floor: canWrite refuses until the room comes back. */
+  readOnly: boolean;
 }
 
 /**
@@ -141,6 +147,13 @@ function readConfig(config?: FairMeterConfig): FairMeterConfig {
   if (c.maxCallsPerMinute !== undefined && !positive(c.maxCallsPerMinute)) throw new Error('FairMeter: maxCallsPerMinute must be a positive integer');
   if (c.tiers) assertTierThresholds(c.tiers);
   if (c.tableKeys) setTableKeys(c.tableKeys);
+  if (c.actions) {
+    const a = c.actions;
+    if (!Array.isArray(a.skus) || !a.skus.length || !a.skus.every((s) => typeof s === 'string' && s)) throw new Error('FairMeter: actions.skus must be a non-empty list of SKUs');
+    if (!positive(a.perPersonPerMinute) || !positive(a.maxConcurrency)) throw new Error('FairMeter: actions.perPersonPerMinute and actions.maxConcurrency must be positive integers');
+    const floor = c.actionFloorMicroUsd;
+    if (!(Number.isSafeInteger(floor) && floor! >= 0 && floor! < c.dailyCapMicroUsd)) throw new Error('FairMeter: actionFloorMicroUsd must be an integer from 0 to below dailyCapMicroUsd');
+  }
   return c;
 }
 
@@ -153,6 +166,8 @@ export class FairMeter {
   private readonly meter: Meter;
   /** Each SKU's versions as last read, oldest first. Sync starts a version at least 10 minutes ahead, so 5 minutes old is safe. */
   private readonly prices = new Map<string, { readAt: number; versions: Record<string, any>[] }>();
+  /** Actions per person in the current UTC minute, this instance only; a new minute starts an empty map. */
+  private actionCounts = { minute: '', perPerson: new Map<string, number>() };
 
   /** Reads FAIR_METER when `config` is omitted. Throws on a bad config (startup, never after a paid call). */
   constructor(config?: FairMeterConfig, clients: { ddb?: DynamoDBDocumentClient; sqs?: SQSClient; now?: () => Date } = {}) {
@@ -256,11 +271,13 @@ export class FairMeter {
       console.error('METER_UNAVAILABLE', { ...log, reason: `max ${JSON.stringify(req.max)} does not fit the ${shape} price` });
       return refuse(503, 'metering_unavailable');
     }
-    if (reserved > cap) {
-      console.error('CALL_EXCEEDS_CAP', { ...log, reservedMicroUsd: reserved, dailyCapMicroUsd: cap });
+    // AI holds stop at cap - floor: the floor stays free for actions the rollup hasn't counted yet.
+    const limit = cap - this.floor;
+    if (reserved > limit) {
+      console.error('CALL_EXCEEDS_CAP', { ...log, reservedMicroUsd: reserved, dailyCapMicroUsd: cap, ...(this.floor ? { actionFloorMicroUsd: this.floor } : {}) });
       return refuse(429, 'daily_limit_reached', { resetsAt: nextUtcDay(at) }, tier);
     }
-    if (committed + reserved > cap) return this.limitReached(log, at, tier);
+    if (committed + reserved > limit) return this.limitReached(log, at, tier);
     if (retryAfterSeconds !== undefined) {
       console.warn('RATE_LIMITED', { ...log, maxCallsPerMinute: this.cfg.maxCallsPerMinute });
       return { ok: false, status: 429, body: { error: 'too_many_requests', retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) }, tier };
@@ -290,7 +307,7 @@ export class FairMeter {
             UpdateExpression: 'ADD committedMicroUsd :reserved',
             // Conditions can't add, so the room left for this hold is computed here.
             ConditionExpression: 'attribute_not_exists(committedMicroUsd) OR committedMicroUsd <= :room',
-            ExpressionAttributeValues: { ':reserved': reserved, ':room': cap - reserved },
+            ExpressionAttributeValues: { ':reserved': reserved, ':room': limit - reserved },
           },
         },
       ],
@@ -440,7 +457,74 @@ export class FairMeter {
       },
       month: { spentMicroUsd: spent(month), resetsAt: nextUtcMonth(at) },
       tier: budgetTier([{ usedMicroUsd: committed, capMicroUsd: cap }], this.cfg.tiers ?? DEFAULT_TIER_THRESHOLDS),
+      readOnly: this.cfg.actions !== undefined && committed > cap - this.floor,
     };
+  }
+
+  /**
+   * After a successful write: one JSON line to stdout (its own log event), which the rollup turns
+   * into an EVENT; no DynamoDB write. Synchronous, never throws. An SKU not configured or an `n`
+   * outside 1..1000 is an app bug: ACTION_UNKNOWN (alarms), no line.
+   */
+  action(req: { person: string; sku: string; n?: number }): void {
+    try {
+      const { person, sku, n = 1 } = req;
+      if (typeof person !== 'string' || !person || !this.cfg.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > 1000) {
+        console.error('ACTION_UNKNOWN', { appId: this.cfg.appId, person, sku, n });
+        return;
+      }
+      process.stdout.write(JSON.stringify({ fairMeter: 'action', appId: this.cfg.appId, env: this.cfg.env, person, sku, n }) + '\n');
+      const counts = this.actionsThisMinute();
+      counts.set(person, (counts.get(person) ?? 0) + n);
+    } catch (err) {
+      console.error('ACTION_UNKNOWN', { appId: this.cfg.appId, req, err });
+    }
+  }
+
+  /**
+   * Before a write that reports `n` actions: `{ ok: true }`, or a ready refusal (the person is
+   * read-only until their room comes back). Never throws. Per instance, at most perPersonPerMinute
+   * actions per person per UTC minute, then one eventually consistent read of the person's day:
+   * committed above cap - floor (pushed there by the rollup) is daily_limit_reached.
+   */
+  async canWrite(person: string, n = 1): Promise<{ ok: true } | Refusal> {
+    const log = { appId: this.cfg.appId, person };
+    try {
+      const a = this.cfg.actions;
+      const bad = !a ? 'no actions configured' : typeof person !== 'string' || !person ? 'no person'
+        : !Number.isInteger(n) || n < 1 || n > a.perPersonPerMinute ? `n ${n} is not 1..perPersonPerMinute` : undefined;
+      if (bad) {
+        console.error('METER_UNAVAILABLE', { ...log, n, reason: bad });
+        return refuse(500, 'metering_unavailable');
+      }
+      const at = this.now();
+      // Bounds what one instance lets a person do within one rollup lag: the floor's premise.
+      if ((this.actionsThisMinute().get(person) ?? 0) + n > a!.perPersonPerMinute) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((Math.floor(at.getTime() / 60_000) * 60_000 + 60_000 - at.getTime()) / 1000));
+        console.warn('RATE_LIMITED', { ...log, perPersonPerMinute: a!.perPersonPerMinute });
+        return { ok: false, status: 429, body: { error: 'too_many_requests', retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) } };
+      }
+      const { Item } = await this.ddb.send(new GetCommand({ TableName: this.cfg.tableName, Key: keys.userDay(person, this.cfg.appId, utcDay(at)) }));
+      const committed = Number(Item?.committedMicroUsd ?? 0);
+      if (committed <= this.cfg.dailyCapMicroUsd - this.floor) return { ok: true };
+      const tier = budgetTier([{ usedMicroUsd: committed, capMicroUsd: this.cfg.dailyCapMicroUsd }], this.cfg.tiers ?? DEFAULT_TIER_THRESHOLDS);
+      return this.limitReached(log, at, tier);
+    } catch (err) {
+      console.error('METER_UNAVAILABLE', { ...log, err });
+      return refuse(503, 'metering_unavailable');
+    }
+  }
+
+  /** The room under the daily cap kept for actions not rolled up yet; 0 without actions. */
+  private get floor(): number {
+    return this.cfg.actions ? this.cfg.actionFloorMicroUsd! : 0;
+  }
+
+  /** This instance's per-person action counts for the current UTC minute. */
+  private actionsThisMinute(): Map<string, number> {
+    const minute = utcMinute(this.now());
+    if (this.actionCounts.minute !== minute) this.actionCounts = { minute, perPerson: new Map() };
+    return this.actionCounts.perPerson;
   }
 
   private limitReached(log: Record<string, unknown>, at: Date, tier: BudgetTier): Refusal {

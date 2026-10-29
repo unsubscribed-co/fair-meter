@@ -20,6 +20,7 @@ import { usdToMicroUsd } from './cost';
 import { EXPORT_COLUMNS, streamFilterPattern } from './export';
 import type { FairMeterConfig } from './fair-meter';
 import { assertAppId, DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
+import { loadPriceFiles } from './prices-cli';
 import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
 
 // esbuild skips tsconfig files inside node_modules, so name ours or the handlers lose "use strict" in an app's bundle.
@@ -590,10 +591,25 @@ export interface MeteringProps {
   tiers?: TierThresholds;
   /** 'hosted' needs the wallet, which doesn't exist yet: refused at synth. */
   billing?: 'none' | 'hosted';
+  /** The app's actions (`action`, `canWrite`); the floor is computed from these at synth. Omitted: no actions. */
+  actions?: {
+    /** Action SKUs, each a `unit: "units"` price file in this package's prices/. */
+    skus: string[];
+    /** Per person, per function instance, per UTC minute (default 20). */
+    perPersonPerMinute?: number;
+    /** The most instances of the granted functions that can run at once (default 10). */
+    maxConcurrency?: number;
+    /**
+     * true (prod): every function given to `grant` must set reserved concurrency, at most
+     * maxConcurrency in total, checked at synth. Omitted (dev): the account's concurrency limit
+     * must be at most maxConcurrency, since it is then the bound.
+     */
+    reserveConcurrency?: boolean;
+  };
 }
 
 /** Log terms that mean money may be wrong or calls are refused; each alarms within 5 minutes. */
-const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED', 'RESERVATION_EXCEEDED', 'USAGE_RECORD_PARKED'];
+const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED', 'RESERVATION_EXCEEDED', 'USAGE_RECORD_PARKED', 'ACTION_UNKNOWN'];
 
 /**
  * FairMeter's infrastructure, from one config: the retry queue (MeteringRetry), the sweeper that
@@ -610,6 +626,8 @@ export class Metering extends Construct {
   readonly config: FairMeterConfig;
   private readonly errors: cloudwatch.Metric;
   private grants = 0;
+  /** With `actions.reserveConcurrency`: the most the granted functions may reserve, and what they reserve so far. */
+  private readonly concurrency?: { max: number; reserved: number };
 
   constructor(scope: Construct, id: string, props: MeteringProps) {
     super(scope, id);
@@ -629,6 +647,16 @@ export class Metering extends Construct {
       throw new Error('Metering: maxCallsPerMinute must be a positive integer');
     }
     if (props.tiers) assertTierThresholds(props.tiers);
+    const actions = props.actions && {
+      skus: props.actions.skus,
+      perPersonPerMinute: props.actions.perPersonPerMinute ?? 20,
+      maxConcurrency: props.actions.maxConcurrency ?? 10,
+    };
+    const actionFloorMicroUsd = actions && floorMicroUsd(actions);
+    if (actionFloorMicroUsd !== undefined && actionFloorMicroUsd >= dailyCapMicroUsd) {
+      throw new Error(`Metering: the action floor (${actionFloorMicroUsd} micro-USD) must be below dailyCapUsd; lower perPersonPerMinute or maxConcurrency`);
+    }
+    if (actions && props.actions!.reserveConcurrency) this.concurrency = { max: actions.maxConcurrency, reserved: 0 };
     // Money records live here: never deleted with the stack, restorable to any second of the last 35 days.
     this.table = new dynamodb.Table(this, 'Ledger', {
       partitionKey: { name: DEFAULT_TABLE_KEYS.pk, type: dynamodb.AttributeType.STRING },
@@ -654,6 +682,7 @@ export class Metering extends Construct {
       ...(props.allAppsDailyCapUsd !== undefined ? { allAppsDailyCapMicroUsd: cap('allAppsDailyCapUsd', props.allAppsDailyCapUsd) } : {}),
       ...(props.maxCallsPerMinute !== undefined ? { maxCallsPerMinute: props.maxCallsPerMinute } : {}),
       ...(props.tiers ? { tiers: props.tiers } : {}),
+      ...(actions ? { actions, actionFloorMicroUsd } : {}),
     };
 
     const sweeperLogs = new logs.LogGroup(this, 'SweeperLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.DESTROY });
@@ -711,6 +740,15 @@ export class Metering extends Construct {
    * makes CDK add its log-retention custom resource.
    */
   grant(fn: lambda.Function): void {
+    if (this.concurrency) {
+      // The floor's proof: at most maxConcurrency instances can serve one person at once.
+      const reserved = (fn.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions;
+      if (typeof reserved !== 'number') throw new Error(`Metering: ${fn.node.path} has no reserved concurrency (actions.reserveConcurrency)`);
+      this.concurrency.reserved += reserved;
+      if (this.concurrency.reserved > this.concurrency.max) {
+        throw new Error(`Metering: the granted functions reserve ${this.concurrency.reserved} concurrency, above actions.maxConcurrency ${this.concurrency.max}`);
+      }
+    }
     this.table.grant(fn, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
     this.retry.queue.grantSendMessages(fn);
     fn.addEnvironment('FAIR_METER', cdk.Stack.of(this).toJsonString(this.config));
@@ -727,4 +765,24 @@ export class Metering extends Construct {
       metricValue: '1',
     });
   }
+}
+
+/**
+ * The most one person can spend on actions within one rollup lag (30 minutes): perPersonPerMinute
+ * x 30 x maxConcurrency x the highest per-action price (rounded up) of any version of any action SKU.
+ * Rounding each action up also covers the rollup's rounding up per window.
+ */
+function floorMicroUsd(a: { skus: string[]; perPersonPerMinute: number; maxConcurrency: number }): number {
+  for (const [name, v] of Object.entries({ perPersonPerMinute: a.perPersonPerMinute, maxConcurrency: a.maxConcurrency })) {
+    if (!(Number.isSafeInteger(v) && v > 0)) throw new Error(`Metering: actions.${name} must be a positive integer`);
+  }
+  if (!Array.isArray(a.skus) || !a.skus.length) throw new Error('Metering: actions.skus must list at least one action SKU');
+  const files = loadPriceFiles();
+  const perAction = Math.max(...a.skus.map((sku) => {
+    const f = files.find((p) => p.sku === sku);
+    if (!f) throw new Error(`Metering: action SKU ${sku} has no price file in prices/`);
+    if (f.unit !== 'units') throw new Error(`Metering: ${sku} is priced in ${f.unit}, not per action (units)`);
+    return Math.max(...f.versions.map((v) => Math.ceil(Number(v.microUsdPerKUnits) / 1000)));
+  }));
+  return a.perPersonPerMinute * 30 * a.maxConcurrency * perAction;
 }

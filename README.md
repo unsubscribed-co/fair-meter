@@ -72,7 +72,7 @@ If the reserve write fails ambiguously (a timeout or 5xx: it may have committed)
 **`usage(person)`**, to show a person their own spend in real time. One strongly consistent `BatchGetItem` of their day row (today, UTC) and month row (this month, UTC):
 
 ```ts
-const { day, month, tier } = await meter.usage(person);
+const { day, month, tier, readOnly } = await meter.usage(person);
 // day:   { spentMicroUsd, heldMicroUsd, capMicroUsd, roomMicroUsd, resetsAt }
 // month: { spentMicroUsd, resetsAt }
 ```
@@ -80,7 +80,8 @@ const { day, month, tier } = await meter.usage(person);
 - `spentMicroUsd` is what the person paid: `costMicroUsd − absorbedMicroUsd`;
 - `heldMicroUsd` is the open holds of calls in flight: `committedMicroUsd − costMicroUsd`, at least 0 (an ADJUST doesn't move `committedMicroUsd`, so after a correction it is approximate);
 - `roomMicroUsd` is what is left under the daily cap: `capMicroUsd − committedMicroUsd`, at least 0;
-- `resetsAt` (ISO, UTC) is the next UTC midnight for the day and the first of next month for the month; `tier` is the one `authorize` would report.
+- `resetsAt` (ISO, UTC) is the next UTC midnight for the day and the first of next month for the month; `tier` is the one `authorize` would report;
+- `readOnly` is true when actions are configured and `committedMicroUsd` is above `cap - floor`: `canWrite` refuses (see Actions), so the app can show a banner without another call.
 
 To show `resetsAt` in the person's own time and language, `resetsAtLocal(resetsAt, { locale, timeZone, now? })` returns `{ time, relative }` from the platform's `Intl` (`{ time: '19:00', relative: 'dentro de 10 horas' }` for `es` in `America/Bogota`); the sentence around them stays in your app's strings.
 
@@ -137,6 +138,43 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts list <app> [--write --valid-fr
 
 `list` downloads the region's public Price List offer files (DynamoDB, Lambda, API Gateway, CloudWatch) and takes each first-tier on-demand list rate, no free tier; a rate it can't find stops the run, naming it. Per action, each component per 1,000 actions, rounded up: database = `rru` plus the write check's half read unit at the read request rate, plus `wru` at the write request rate; API = `apiRequests` at the HTTP API rate; compute = `lambdaRequests` at the Arm request rate plus `billedMs` x `memoryMb` as Arm GB-seconds; logs = `logBytes` ingested plus the same bytes scanned once by the rollup (GB = 2^30 bytes); other = 0. It prints each line (components, cost, fee from `prices/fee.json`, price) and per profile the monthly cost (30 days), the price with the fee and how many days $2 lasts; AI calls are priced at their SKU's current version. `--write` appends a version starting at `--valid-from` to each `prices/<sku>.json` whose rates differ from its latest version (creating the file for a new SKU; a version is never edited), refuses a `validFrom` less than 10 minutes ahead, and writes the published list, `prices/apps/<app>.list.json`. Then `sync`.
 
+### Actions
+
+An action is something a person does that costs AWS money but no provider call (StackSplit's "new expense"). It is reported as a log line, never a write, and a scheduled rollup turns the lines into EVENTs at the action SKU's price. Two calls around each write:
+
+```ts
+const check = await meter.canWrite(person); // canWrite(person, n) before a write of n actions
+if (!check.ok) return reply(check.status, check.body, check.headers); // read-only: reads and exports still work
+await saveExpense(...);
+meter.action({ person, sku: 'stacksplit-new-expense' }); // after the write succeeded; { n } for several
+```
+
+**`action({ person, sku, n = 1 })`** is synchronous, never throws and does no I/O but one JSON line written straight to stdout as its own log event: `{"fairMeter":"action","appId","env","person","sku","n"}`. It also counts `n` for the person in this instance's current UTC minute. An SKU not in `actions.skus`, or `n` not an integer from 1 to 1000, logs `ACTION_UNKNOWN` (alarms) and writes no line.
+
+**`canWrite(person, n = 1)`** returns `{ ok: true }` or a refusal like `authorize`'s, and never throws:
+- the person's actions this UTC minute on this instance plus `n` above `perPersonPerMinute`: `too_many_requests` (429, `Retry-After` to the next minute), logged `RATE_LIMITED` (warn), no read;
+- else one eventually consistent `GetItem` of the person's day row (half a read unit): `committedMicroUsd` above `cap - floor` is `daily_limit_reached` (429, `resetsAt`): the person is read-only until the room comes back;
+- a read error: `metering_unavailable` (503, fail closed); no `actions` configured, no person or an `n` outside 1..`perPersonPerMinute` (an app bug: it could never pass): `metering_unavailable` (500), logged `METER_UNAVAILABLE`.
+
+Call `canWrite` before each write and `action` right after it, one write at a time per invocation: the count only moves in `action`. A bulk write larger than `perPersonPerMinute` can't pass `canWrite`; meter it as a priced call instead, `authorize({ person, sku, max: { units: n } })` then `record(call, { units: n })`, which holds its cost against the cap like any call.
+
+```ts
+new Metering(this, 'Metering', {
+  appId: 'stacksplit', env: stage, dailyCapUsd: '0.50', appDailyCapUsd: '5',
+  actions: { skus: ['stacksplit-new-expense'], perPersonPerMinute: 20, maxConcurrency: 10, reserveConcurrency: stage === 'prod' },
+});
+```
+
+**The floor** is the room under the daily cap kept for actions the rollup hasn't counted yet. `Metering` computes it at synth and writes it into the config as `actionFloorMicroUsd`:
+
+floor = `perPersonPerMinute` x 30 x `maxConcurrency` x the highest per-action price (micro-USD, rounded up) over every version of every SKU in `actions.skus`
+
+Defaults: `perPersonPerMinute` 20, `maxConcurrency` 10. For example, 20 x 30 x 10 x 5 micro-USD = 30,000 micro-USD, $0.03 of a $0.50 cap. Synth fails when an SKU has no `unit: "units"` price file in `prices/`, or when the floor isn't below `dailyCapUsd`.
+
+Why it bounds spend (prepaid, never debt): AI holds can't use the floor (`authorize` checks and reserves against `cap - floor`), and an action reaches `committedMicroUsd` at most 30 minutes after it happens. Within those 30 minutes one instance lets a person do at most `perPersonPerMinute` actions a minute, and at most `maxConcurrency` instances run at once, so the actions not yet counted cost at most the floor. Rounding each action's price up also covers the rollup's rounding up per window. So at any moment the person's spend is at most committed (no more than `cap - floor` when the last write was allowed) plus the floor: the cap.
+
+**Reserved concurrency.** `maxConcurrency` must really bound the instances. With `reserveConcurrency: true` (prod), every function given to `grant` must set `reservedConcurrentExecutions`, at most `maxConcurrency` in total, or synth fails. Without it (dev), nothing is checked and the account's concurrency limit is the bound: keep `maxConcurrency` at least that limit (the dev account's limit is 10, the default; AWS refuses any reservation there).
+
 ### Known limits (v0.2.0)
 
 - **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the reservation. Conservative: the cap is tighter, never overshot.
@@ -146,6 +184,7 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts list <app> [--write --valid-fr
 - **One hot partition per app.** Every attempt writes and deletes a `PENDING#<app>` row: about 500 attempts a second per app before DynamoDB's per-partition limit. Shard the key if an app gets there.
 - **`sync` only adds.** A version in the table that no file has (e.g. from the old admin CLI) is kept, and closed by the next file version. Nothing is overwritten, but the files are not yet the only home.
 - **The sweeper is serial, 60 s per run.** After an outage with thousands of open holds it takes several runs, each timing out (SweeperFailureAlarm). It converges, because settled rows disappear.
+- **The action count lives in each instance's memory.** A new instance (a cold start, a crash, a deploy) starts at zero for the current minute, so a replaced instance can let a person do up to `perPersonPerMinute` more that minute. The floor assumes the rollup counts every action within 30 minutes; an outage of the rollup alarms.
 
 What lands in the ledger table: `USER#<person>` / `EVENT#<at>#<app>#<callId>` per settled attempt (with `env`, `paidBy`, `reservedMicroUsd`, `estimated` when it is), the usual day, month, app, all-apps and provider counters, and `PENDING#<app>` / `CALL#<callId>` while an attempt is open. All money is integer micro-USD, rounded up.
 
