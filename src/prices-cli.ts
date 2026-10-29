@@ -116,6 +116,9 @@ export function feeAt(at: Date, fee = parseFeeFile(readFileSync(path.join(PRICES
   return version;
 }
 
+/** A new version's least lead time: twice FairMeter's 5-minute price cache. */
+const MIN_LEAD_MS = 10 * 60_000;
+
 const itemOf = (f: PriceFile, v: PriceFile['versions'][number]) => ({ provider: f.provider, ...v });
 
 /** A stored version as the file would write it: without its keys and the range close sync adds. */
@@ -165,6 +168,9 @@ export async function syncPrices(ddb: DynamoDBDocumentClient, table: string, fil
       }
       try {
         const { closePrevious } = planNewVersion(latest, v.validFrom, now, backdate);
+        if (!backdate && v.validFrom < pricingTime(new Date(now.getTime() + MIN_LEAD_MS))) {
+          throw new Error(`starts less than 10 minutes after now (${pricingTime(now)}): FairMeter caches prices for 5 minutes, so a warm instance could still price calls at the old version`);
+        }
         writes.push({ label, item, ...(closePrevious ? { close: { sk: closePrevious.sk, validTo: closePrevious.validTo } } : {}) });
         latest = { [tableKeys().sk]: v.validFrom, ...item };
       } catch (err) {

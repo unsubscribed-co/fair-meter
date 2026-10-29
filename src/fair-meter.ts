@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
-import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { assertTierThresholds, budgetTier, DEFAULT_TIER_THRESHOLDS, type BudgetTier, type TierThresholds } from './budget';
 import type { Meters } from './cost';
-import { assertAppId, keys, nextUtcDay, pkNotExists, setTableKeys, utcDay, type TableKeys } from './keys';
+import { assertAppId, keys, nextUtcDay, pkNotExists, setTableKeys, skOf, tableKeys, utcDay, type TableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
 import { Meter } from './meter';
-import { priceCall, priceShape, reserveCost, type CallUsage, type PriceShape } from './pricing';
+import { priceCall, priceShape, pricingTime, reserveCost, versionCovers, type CallUsage, type PriceShape } from './pricing';
 import { isProvider, metersFromUsage, type Provider } from './usage';
 
 /*
@@ -128,8 +128,10 @@ export class FairMeter {
   private readonly ddb: DynamoDBDocumentClient;
   private readonly sqs: SQSClient;
   private readonly now: () => Date;
-  /** The old path's price lookup and brake, reused as they are. */
+  /** The old path's brake, reused as it is. */
   private readonly meter: Meter;
+  /** Each SKU's versions as last read, oldest first. Sync starts a version at least 10 minutes ahead, so 5 minutes old is safe. */
+  private readonly prices = new Map<string, { readAt: number; versions: Record<string, any>[] }>();
 
   /** Reads FAIR_METER when `config` is omitted. Throws on a bad config (startup, never after a paid call). */
   constructor(config?: FairMeterConfig, clients: { ddb?: DynamoDBDocumentClient; sqs?: SQSClient; now?: () => Date } = {}) {
@@ -156,6 +158,22 @@ export class FairMeter {
    * against the person's daily cap, atomically. Never throws: a refusal is a ready HTTP answer.
    */
   async authorize(req: CallRequest): Promise<Reservation | Refusal> {
+    const started = Date.now();
+    const timing: Timing = { readsMs: 0, attempts: 0 };
+    const result = await this.authorizeTimed(req, timing);
+    console.log('AUTHORIZE_TIMING', {
+      appId: this.cfg.appId,
+      sku: req?.sku,
+      outcome: result.ok ? 'ok' : result.body.error,
+      readsMs: timing.readsMs,
+      reserveMs: timing.reserving === undefined ? 0 : Date.now() - timing.reserving,
+      totalMs: Date.now() - started,
+      attempts: timing.attempts,
+    });
+    return result;
+  }
+
+  private async authorizeTimed(req: CallRequest, timing: Timing): Promise<Reservation | Refusal> {
     const bad = badRequest(req);
     if (bad) {
       // An app bug (TypeScript callers can't get here): refused and alarmed, never thrown.
@@ -163,22 +181,23 @@ export class FairMeter {
       return refuse(500, 'metering_unavailable');
     }
     try {
-      return await this.reserve(req);
+      return await this.reserve(req, timing);
     } catch (err) {
       console.error('METER_UNAVAILABLE', { appId: this.cfg.appId, person: req.person, sku: req.sku, err });
       return refuse(503, 'metering_unavailable');
     }
   }
 
-  private async reserve(req: CallRequest): Promise<Reservation | Refusal> {
+  private async reserve(req: CallRequest, timing: Timing): Promise<Reservation | Refusal> {
     const { appId, tableName: table } = this.cfg;
     const at = this.now();
     const day = utcDay(at);
     const log = { appId, person: req.person, sku: req.sku };
     let read;
+    const reading = Date.now();
     try {
       read = await Promise.all([
-        this.meter.pricingItem(req.sku, at),
+        this.priceAt(req.sku, at),
         this.get(keys.userDay(req.person, appId, day)),
         this.get(keys.appDay(appId, day)),
         this.cfg.allAppsDailyCapMicroUsd === undefined ? undefined : this.get(keys.globalDay(day)),
@@ -187,6 +206,8 @@ export class FairMeter {
     } catch (err) {
       console.error('METER_UNAVAILABLE', { ...log, err });
       return refuse(503, 'metering_unavailable');
+    } finally {
+      timing.readsMs = Date.now() - reading;
     }
     const [found, userDay, appDay, allAppsDay, retryAfterSeconds] = read;
     const price = found?.item;
@@ -253,7 +274,9 @@ export class FairMeter {
         },
       ],
     });
+    timing.reserving = Date.now();
     for (let attempt = 0; ; attempt++) {
+      timing.attempts = attempt + 1;
       try {
         await this.ddb.send(reserve);
         return { ok: true, tier: tierAt(committed + reserved), callId, hold };
@@ -369,6 +392,34 @@ export class FairMeter {
     return refuse(429, 'daily_limit_reached', { resetsAt: nextUtcDay(at) }, tier);
   }
 
+  /**
+   * The PRICING#<sku> version whose [validFrom, validTo) range contains `at`, from the SKU's versions
+   * read at most once per 5 minutes (none found isn't cached). Undefined when none does (logged).
+   */
+  private async priceAt(sku: string, at: Date): Promise<{ version: string; item: Record<string, any> } | undefined> {
+    let cached = this.prices.get(sku);
+    const age = at.getTime() - (cached?.readAt ?? 0);
+    if (!cached || age < 0 || age >= PRICE_CACHE_MS) {
+      // shortcut: one page (1 MB, thousands of versions); paginate if a SKU ever gets near that.
+      const { Items = [] } = await this.ddb.send(new QueryCommand({
+        TableName: this.cfg.tableName,
+        KeyConditionExpression: `${tableKeys().pk} = :pk`,
+        ExpressionAttributeValues: { ':pk': `PRICING#${sku}` },
+      }));
+      cached = { readAt: at.getTime(), versions: Items };
+      if (Items.length) this.prices.set(sku, cached);
+    }
+    const t = pricingTime(at);
+    const item = cached.versions.filter((v) => skOf(v) <= t).at(-1);
+    if (!item) return undefined;
+    const version = `${sku}@${skOf(item)}`;
+    if (!versionCovers(item, at)) {
+      console.error('PRICE_VERSION_GAP', { version, at: at.toISOString(), validTo: item.validTo });
+      return undefined;
+    }
+    return { version, item };
+  }
+
   private async get(key: Record<string, string>) {
     return (await this.ddb.send(new GetCommand({ TableName: this.cfg.tableName, Key: key, ConsistentRead: true }))).Item;
   }
@@ -383,6 +434,11 @@ function badRequest(req: CallRequest | undefined): string | undefined {
   if (req.paidBy !== undefined && req.paidBy !== 'credit' && req.paidBy !== 'paid') return 'a request with an unknown paidBy';
   return undefined;
 }
+
+const PRICE_CACHE_MS = 5 * 60_000;
+
+/** AUTHORIZE_TIMING's facts as authorize goes: the reads' ms, when the reserve began, its sends. */
+type Timing = { readsMs: number; reserving?: number; attempts: number };
 
 const jitter = () => new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 150));
 
