@@ -24,7 +24,8 @@ export const MAX_WINDOWS = 8;
 export function actionQuery(appId: string, windowStart: number): string {
   return [
     `filter fairMeter = "action" and appId = "${appId}" and @timestamp >= ${windowStart} and @timestamp < ${windowStart + WINDOW_MS}`,
-    'stats sum(n) as n by person, sku, env',
+    // Not `as n`: Logs Insights returns no value for an alias that names a field of the lines (seen in StackSplit's dev).
+    'stats sum(n) as actions by person, sku, env',
   ].join(' | ');
 }
 
@@ -66,8 +67,8 @@ export async function rollup(
       }
       const records: UsageRecord[] = [];
       for (const row of rows) {
-        const { person, sku, env, n } = Object.fromEntries(row.map((f) => [f.field, f.value]));
-        const count = Number(n);
+        const { person, sku, env, actions } = Object.fromEntries(row.map((f) => [f.field, f.value]));
+        const count = Number(actions);
         if (!person || !sku || !env || !(Number.isSafeInteger(count) && count > 0)) throw new Error(`Rollup: unreadable row in the ${windowStart} window: ${JSON.stringify(row)}`);
         const price = await priceAt(ddb, cfg.tableName, prices, sku, new Date(start));
         const priced = price && priceCall(price.item, { units: count }, new Date(start));

@@ -38,7 +38,7 @@ function logs(byWindow: Record<string, Row[]>) {
   logsMock.on(GetQueryResultsCommand).callsFake((input) => ({
     status: 'Complete',
     results: (byWindow[input.queryId] ?? []).map((r) => [
-      { field: 'person', value: r.person }, { field: 'sku', value: r.sku }, { field: 'env', value: r.env ?? 'prod' }, { field: 'n', value: String(r.n) },
+      { field: 'person', value: r.person }, { field: 'sku', value: r.sku }, { field: 'env', value: r.env ?? 'prod' }, { field: 'actions', value: String(r.n) },
     ]),
   }));
 }
@@ -224,7 +224,7 @@ test("the query reads the line action() writes: its filters match the line's val
   for (const [field, value] of equalities) expect(line[field]).toBe(value);
   // 14:00 and 14:15 UTC on 2026-11-03, in epoch ms.
   expect(filter).toContain('@timestamp >= 1793714400000 and @timestamp < 1793715300000');
-  const [, summed, by] = /^stats sum\((\w+)\) as n by (.+)$/.exec(stats)!;
+  const [, summed, by] = /^stats sum\((\w+)\) as actions by (.+)$/.exec(stats)!;
   expect(typeof line[summed]).toBe('number');
   expect(by.split(', ')).toEqual(['person', 'sku', 'env']);
   for (const field of by.split(', ')) expect(line[field]).toEqual(expect.any(String));
