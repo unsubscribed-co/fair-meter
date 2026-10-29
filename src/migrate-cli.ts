@@ -7,7 +7,7 @@ import { checkAppId, parseFlags } from './report';
 /*
  * Copies an app table's ledger rows for one app into Metering's own ledger table (v0.3.0).
  *
- *   npx tsx node_modules/fair-meter/src/migrate-cli.ts migrate --from <app table> [--from-keys pk,sk]
+ *   npx tsx node_modules/fair-meter/src/migrate-cli.ts --from <app table> [--from-keys pk,sk]
  *       [--from-user-prefix USER#] --to <ledger table> --app <appId> [--apply]
  *
  * Reads the source only. Dry run by default (counts per family); --apply writes each row in its own
