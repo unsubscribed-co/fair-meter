@@ -1,0 +1,126 @@
+{
+ "formatVersion": "v1.0",
+ "offerCode": "AmazonApiGateway",
+ "version": "20261013003044",
+ "publicationDate": "2026-10-13T00:30:44Z",
+ "products": {
+  "FC2TWT2UEPTBKVBX": {
+   "sku": "FC2TWT2UEPTBKVBX",
+   "productFamily": "API Calls",
+   "attributes": {
+    "servicecode": "AmazonApiGateway",
+    "description": "HTTP API Requests",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "usagetype": "USE1-ApiGatewayHttpRequest",
+    "operation": "ApiGatewayHttpApi",
+    "regionCode": "us-east-1",
+    "servicename": "Amazon API Gateway"
+   }
+  },
+  "KKDZ3TFSXUSMCZ3A": {
+   "sku": "KKDZ3TFSXUSMCZ3A",
+   "productFamily": "API Calls",
+   "attributes": {
+    "servicecode": "AmazonApiGateway",
+    "description": "API calls received",
+    "location": "US East (N. Virginia)",
+    "locationType": "AWS Region",
+    "usagetype": "USE1-ApiGatewayRequest",
+    "operation": "ApiGatewayRequest",
+    "regionCode": "us-east-1",
+    "servicename": "Amazon API Gateway"
+   }
+  }
+ },
+ "terms": {
+  "OnDemand": {
+   "FC2TWT2UEPTBKVBX": {
+    "FC2TWT2UEPTBKVBX.JRTCKXETXF": {
+     "offerTermCode": "JRTCKXETXF",
+     "sku": "FC2TWT2UEPTBKVBX",
+     "effectiveDate": "2026-10-01T00:00:00Z",
+     "priceDimensions": {
+      "FC2TWT2UEPTBKVBX.JRTCKXETXF.9NXBCPDZYR": {
+       "rateCode": "FC2TWT2UEPTBKVBX.JRTCKXETXF.9NXBCPDZYR",
+       "description": "$1/million requests - API Gateway HTTP API (first 300 million)",
+       "beginRange": "0",
+       "endRange": "300000000",
+       "unit": "Requests",
+       "pricePerUnit": {
+        "USD": "0.0000010000"
+       },
+       "appliesTo": []
+      },
+      "FC2TWT2UEPTBKVBX.JRTCKXETXF.Y5DREYKEMT": {
+       "rateCode": "FC2TWT2UEPTBKVBX.JRTCKXETXF.Y5DREYKEMT",
+       "description": "$0.9/million requests - API Gateway HTTP API (more than 300 million)",
+       "beginRange": "300000000",
+       "endRange": "Inf",
+       "unit": "Requests",
+       "pricePerUnit": {
+        "USD": "0.0000009000"
+       },
+       "appliesTo": []
+      }
+     },
+     "termAttributes": {}
+    }
+   },
+   "KKDZ3TFSXUSMCZ3A": {
+    "KKDZ3TFSXUSMCZ3A.JRTCKXETXF": {
+     "offerTermCode": "JRTCKXETXF",
+     "sku": "KKDZ3TFSXUSMCZ3A",
+     "effectiveDate": "2026-10-01T00:00:00Z",
+     "priceDimensions": {
+      "KKDZ3TFSXUSMCZ3A.JRTCKXETXF.QS4VQ8N7FD": {
+       "rateCode": "KKDZ3TFSXUSMCZ3A.JRTCKXETXF.QS4VQ8N7FD",
+       "description": "$3.50/million requests - first 333 million requests/month",
+       "beginRange": "0",
+       "endRange": "333000000",
+       "unit": "Requests",
+       "pricePerUnit": {
+        "USD": "0.0000035000"
+       },
+       "appliesTo": []
+      },
+      "KKDZ3TFSXUSMCZ3A.JRTCKXETXF.DRE2JBTXBV": {
+       "rateCode": "KKDZ3TFSXUSMCZ3A.JRTCKXETXF.DRE2JBTXBV",
+       "description": "$2.80/million requests - next 667 million requests/month",
+       "beginRange": "333000000",
+       "endRange": "1000000000",
+       "unit": "Requests",
+       "pricePerUnit": {
+        "USD": "0.0000028000"
+       },
+       "appliesTo": []
+      },
+      "KKDZ3TFSXUSMCZ3A.JRTCKXETXF.J4SY3H5SUC": {
+       "rateCode": "KKDZ3TFSXUSMCZ3A.JRTCKXETXF.J4SY3H5SUC",
+       "description": "$2.38/million requests - next 19 billion requests/month",
+       "beginRange": "1000000000",
+       "endRange": "20000000000",
+       "unit": "Requests",
+       "pricePerUnit": {
+        "USD": "0.0000023800"
+       },
+       "appliesTo": []
+      },
+      "KKDZ3TFSXUSMCZ3A.JRTCKXETXF.KVC36CKCEW": {
+       "rateCode": "KKDZ3TFSXUSMCZ3A.JRTCKXETXF.KVC36CKCEW",
+       "description": "$1.51/million requests - over 20 billion requests/month",
+       "beginRange": "20000000000",
+       "endRange": "Inf",
+       "unit": "Requests",
+       "pricePerUnit": {
+        "USD": "0.0000015100"
+       },
+       "appliesTo": []
+      }
+     },
+     "termAttributes": {}
+    }
+   }
+  }
+ }
+}

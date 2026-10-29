@@ -1,12 +1,12 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import { formatUsd } from './cost';
+import { computeUnitCost, formatUsd, METER_NAMES, type Meters } from './cost';
 import { setTableKeys, skOf, tableKeys } from './keys';
-import { parseValidFrom, planNewVersion, priceShape, pricingTime, versionRanges, type PriceShape } from './pricing';
-import { parseFlags } from './report';
+import { parseValidFrom, planNewVersion, priceCall, priceShape, pricingTime, versionRanges, type PriceShape } from './pricing';
+import { checkAppId, parseFlags } from './report';
 import { isProvider } from './usage';
 
 /*
@@ -17,8 +17,12 @@ import { isProvider } from './usage';
  *       same transaction. A stored version with other values is refused (nothing is written); so is
  *       a new version that starts before one already stored.
  *   npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <name> [--keys pk,sk]
+ *   npx tsx node_modules/fair-meter/src/prices-cli.ts list <app> [--write --valid-from <iso>]
+ *       Prices each action in prices/apps/<app>.json at AWS's public Price List (no credentials),
+ *       plus the fee. --write appends a version to each SKU whose rates changed and writes
+ *       prices/apps/<app>.list.json.
  *
- * Credentials: the AWS SDK's usual chain (AWS_PROFILE, ...).
+ * Credentials (sync, price-history): the AWS SDK's usual chain (AWS_PROFILE, ...).
  */
 
 export const PRICES_DIR = path.join(__dirname, '..', 'prices');
@@ -114,6 +118,249 @@ export function feeAt(at: Date, fee = parseFeeFile(readFileSync(path.join(PRICES
   const version = [...fee.versions].reverse().find((v) => v.validFrom <= t);
   if (!version) throw new Error(`prices/${FEE_FILE}: no fee version at ${t}`);
   return version;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The price list: an app's measured usage per action times AWS's public Price List, plus the fee.
+
+export const OFFER_SERVICES = ['AmazonDynamoDB', 'AWSLambda', 'AmazonApiGateway', 'AmazonCloudWatch'] as const;
+type OfferService = typeof OFFER_SERVICES[number];
+
+export const PRICE_LIST_SOURCE = 'https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/index.json';
+const offerUrl = (service: OfferService, region: string) => `https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/${service}/current/${region}/index.json`;
+
+/** Each rate the list needs: its product (usage type without the region prefix, and group) and the unit AWS prices it in. */
+const RATE_PRODUCTS = {
+  readRequestUnit: { service: 'AmazonDynamoDB', usage: 'ReadRequestUnits', group: 'DDB-ReadUnits', unit: 'ReadRequestUnits' },
+  writeRequestUnit: { service: 'AmazonDynamoDB', usage: 'WriteRequestUnits', group: 'DDB-WriteUnits', unit: 'WriteRequestUnits' },
+  armRequest: { service: 'AWSLambda', usage: 'Request-ARM', group: 'AWS-Lambda-Requests-ARM', unit: 'Requests' },
+  armGbSecond: { service: 'AWSLambda', usage: 'Lambda-GB-Second-ARM', group: 'AWS-Lambda-Duration-ARM', unit: 'Lambda-GB-Second' },
+  httpApiRequest: { service: 'AmazonApiGateway', usage: 'ApiGatewayHttpRequest', group: undefined, unit: 'Requests' },
+  logIngestedGb: { service: 'AmazonCloudWatch', usage: 'DataProcessing-Bytes', group: 'Ingested Logs', unit: 'GB' },
+  logScannedGb: { service: 'AmazonCloudWatch', usage: 'DataScanned-Bytes', group: 'Queried Logs', unit: 'GB' },
+} as const;
+export type Rates = Record<keyof typeof RATE_PRODUCTS, string>;
+
+/**
+ * The first-tier on-demand list rate of each product, in USD per unit as the offer file writes it.
+ * A tier priced 0 is a free tier and skipped. A rate missing or ambiguous stops the run, naming it.
+ */
+export function extractRates(offers: Record<string, any>): Rates {
+  const rates = {} as Rates;
+  for (const [name, want] of Object.entries(RATE_PRODUCTS) as [keyof Rates, typeof RATE_PRODUCTS[keyof Rates]][]) {
+    const offer = offers[want.service];
+    const usage = new RegExp(`^([A-Z0-9]+-)?${want.usage}$`);
+    const found = new Set<string>();
+    for (const [sku, product] of Object.entries<any>(offer.products ?? {})) {
+      if (!usage.test(product.attributes?.usagetype) || product.attributes?.group !== want.group) continue;
+      const dims = Object.values<any>(offer.terms?.OnDemand?.[sku] ?? {}).flatMap((t) => Object.values<any>(t.priceDimensions))
+        .filter((d) => d.unit === want.unit && Number(d.pricePerUnit?.USD) > 0)
+        .sort((a, b) => Number(a.beginRange) - Number(b.beginRange));
+      if (dims.length) found.add(dims[0].pricePerUnit.USD);
+    }
+    if (found.size !== 1) throw new Error(`${name}: ${found.size ? `ambiguous (${[...found].join(', ')})` : 'not'} in the ${want.service} Price List`);
+    rates[name] = [...found][0];
+  }
+  return rates;
+}
+
+/** The region's offer files, public: no credentials. */
+export async function fetchOffers(region: string): Promise<Record<OfferService, any>> {
+  return Object.fromEntries(await Promise.all(OFFER_SERVICES.map(async (s) => {
+    const res = await fetch(offerUrl(s, region));
+    if (!res.ok) throw new Error(`${offerUrl(s, region)}: HTTP ${res.status}`);
+    return [s, await res.json()];
+  }))) as Record<OfferService, any>;
+}
+
+const MEASURED = ['rru', 'wru', 'apiRequests', 'lambdaRequests', 'billedMs', 'memoryMb', 'logBytes', 'samples', 'measuredAt'] as const;
+const PROFILES = ['light', 'regular', 'heavy'] as const;
+
+/** prices/apps/<app>.json: the app's measured averages per action SKU, and three user profiles. */
+export interface AppFile {
+  region: string;
+  /** Averages per action from `samples` measured requests (measuredAt is when). */
+  actions: Record<string, Record<Exclude<typeof MEASURED[number], 'measuredAt'>, number> & { measuredAt: string }>;
+  /** Per profile: actions a day per action SKU; AI calls a day per SKU with the average meters of one call. */
+  profiles: Record<typeof PROFILES[number], {
+    actions: Record<string, number>;
+    ai: Record<string, { callsPerDay: number; meters: Partial<Meters> }>;
+  }>;
+}
+
+export function parseAppFile(app: string, text: string): AppFile {
+  const f = JSON.parse(text) as AppFile;
+  const fail = (why: string): never => { throw new Error(`prices/apps/${app}.json: ${why}`); };
+  const exactly = (o: unknown, keys: readonly string[], what: string) => {
+    if (typeof o !== 'object' || o === null || Object.keys(o).sort().join() !== [...keys].sort().join()) fail(`${what} must be exactly ${keys.join(', ')}`);
+  };
+  const isObject = (o: unknown): o is Record<string, any> => typeof o === 'object' && o !== null && !Array.isArray(o);
+  const isCount = (n: unknown) => Number.isSafeInteger(n) && (n as number) >= 0;
+  exactly(f, ['region', 'actions', 'profiles'], 'the file');
+  if (!/^[a-z]{2}(-[a-z]+)+-\d$/.test(f.region)) fail('region must be an AWS region code');
+  if (!isObject(f.actions) || !Object.keys(f.actions).length) fail('actions must name at least one action SKU');
+  for (const [sku, m] of Object.entries(f.actions)) {
+    exactly(m, MEASURED, `actions.${sku}`);
+    for (const k of MEASURED.slice(0, -2)) if (typeof m[k] !== 'number' || !(m[k] >= 0) || !Number.isFinite(m[k])) fail(`actions.${sku}.${k} must be a number, 0 or more`);
+    if (!Number.isSafeInteger(m.samples) || m.samples < 1) fail(`actions.${sku}.samples must be a whole number, 1 or more`);
+    if (!isCanonical(m.measuredAt)) fail(`actions.${sku}.measuredAt must be YYYY-MM-DDTHH:MM:SSZ`);
+  }
+  exactly(f.profiles, PROFILES, 'profiles');
+  for (const name of PROFILES) {
+    const p = f.profiles[name];
+    exactly(p, ['actions', 'ai'], `profiles.${name}`);
+    if (!isObject(p.actions) || !isObject(p.ai)) fail(`profiles.${name}: actions and ai must be objects`);
+    for (const [sku, n] of Object.entries(p.actions)) {
+      if (!(sku in f.actions)) fail(`profiles.${name}.actions.${sku} was not measured`);
+      if (!isCount(n)) fail(`profiles.${name}.actions.${sku} must be a whole number a day`);
+    }
+    for (const [sku, call] of Object.entries(p.ai)) {
+      exactly(call, ['callsPerDay', 'meters'], `profiles.${name}.ai.${sku}`);
+      if (!isCount(call.callsPerDay)) fail(`profiles.${name}.ai.${sku}.callsPerDay must be a whole number`);
+      if (!isObject(call.meters) || !Object.entries(call.meters).every(([k, v]) => (METER_NAMES as readonly string[]).includes(k) && isCount(v))) {
+        fail(`profiles.${name}.ai.${sku}.meters must be whole numbers of ${METER_NAMES.join(', ')}`);
+      }
+    }
+  }
+  return f;
+}
+
+/** A JSON number or a Price List decimal as an exact fraction n / 10^scale (no float rounding on money). */
+function exact(v: number | string): [bigint, number] {
+  const m = /^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(String(v));
+  if (!m) throw new Error(`not a decimal: ${v}`);
+  const frac = m[2] ?? '';
+  const scale = frac.length - Number(m[3] ?? 0);
+  const n = BigInt(m[1] + frac);
+  return scale < 0 ? [n * 10n ** BigInt(-scale), 0] : [n, scale];
+}
+
+/** The sum of products of factors, times 1,000 actions, in micro-USD rounded up. */
+function microUsdPerK(...terms: (number | string)[][]): number {
+  const fractions = terms.map((t) => t.map(exact).reduce(([n, s], [m, r]) => [n * m, s + r], [1_000n * 1_000_000n, 0] as [bigint, number]));
+  const scale = Math.max(...fractions.map(([, s]) => s));
+  const sum = fractions.reduce((acc, [n, s]) => acc + n * 10n ** BigInt(scale - s), 0n);
+  const d = 10n ** BigInt(scale);
+  return Number((sum + d - 1n) / d);
+}
+
+/** Exact decimals: AWS bills log data per GB of 2^30 bytes, and Lambda per GB (1,024 MB) second. */
+const PER_BYTE_GB = '0.000000000931322574615478515625';
+const PER_MS_MB_GB_SECOND = '0.0000009765625';
+
+/** One action's components at list rates, each integer micro-USD per 1,000 actions. */
+function actionComponents(m: AppFile['actions'][string], r: Rates): Record<string, number> {
+  return {
+    // Every write first runs the write check: one eventually consistent read, half a read unit.
+    database: microUsdPerK([m.rru, r.readRequestUnit], [0.5, r.readRequestUnit], [m.wru, r.writeRequestUnit]),
+    api: microUsdPerK([m.apiRequests, r.httpApiRequest]),
+    compute: microUsdPerK([m.lambdaRequests, r.armRequest], [m.billedMs, m.memoryMb, r.armGbSecond, PER_MS_MB_GB_SECOND]),
+    // Ingested, then scanned once by the rollup's Logs Insights query.
+    logs: microUsdPerK([m.logBytes, r.logIngestedGb, PER_BYTE_GB], [m.logBytes, r.logScannedGb, PER_BYTE_GB]),
+    other: 0,
+  };
+}
+
+export interface PriceList {
+  app: string;
+  region: string;
+  at: string;
+  feeBps: number;
+  /** USD per unit, as the Price List writes them. */
+  rates: Rates;
+  actions: { sku: string; components: Record<string, number>; costMicroUsdPerK: number; feeMicroUsdPerK: number; priceMicroUsdPerK: number }[];
+  profiles: Record<typeof PROFILES[number], {
+    ai: { sku: string; callsPerDay: number; costMicroUsdPerCall: number }[];
+    dailyCostMicroUsd: number;
+    monthlyCostMicroUsd: number;
+    monthlyPriceMicroUsd: number;
+    /** How many days $2 lasts at the price with the fee. */
+    daysFor2Usd: number;
+  }>;
+}
+
+const MONTH_DAYS = 30;
+
+/** The list: each action's components, cost, fee and price; per profile what a month costs and how long $2 lasts. */
+export function priceList(app: string, file: AppFile, rates: Rates, skus: PriceFile[], now: Date, feeBps = feeAt(now).feeBps): PriceList {
+  const actions = Object.entries(file.actions).map(([sku, m]) => {
+    const components = actionComponents(m, rates);
+    const cost = COMPONENTS.reduce((sum, k) => sum + components[k], 0);
+    const price = computeUnitCost(1_000, cost, feeBps).costMicroUsd;
+    return { sku, components, costMicroUsdPerK: cost, feeMicroUsdPerK: price - cost, priceMicroUsdPerK: price };
+  });
+  const t = pricingTime(now);
+  const profiles = Object.fromEntries(PROFILES.map((name) => {
+    const p = file.profiles[name];
+    const ai = Object.entries(p.ai).map(([sku, call]) => {
+      const version = skus.find((f) => f.sku === sku)?.versions.filter((v) => v.validFrom <= t).at(-1);
+      if (!version) throw new Error(`profiles.${name}.ai.${sku}: no price version at ${t}`);
+      const meters = Object.fromEntries(METER_NAMES.map((k) => [k, call.meters[k] ?? 0])) as unknown as Meters;
+      const priced = priceCall(version, { meters }, now);
+      if ('error' in priced) throw new Error(`profiles.${name}.ai.${sku}: ${priced.error}`);
+      return { sku, callsPerDay: call.callsPerDay, costMicroUsdPerCall: priced.costMicroUsd };
+    });
+    const daily = Object.entries(p.actions).reduce((sum, [sku, n]) => sum + computeUnitCost(n, actions.find((a) => a.sku === sku)!.costMicroUsdPerK, 0).costMicroUsd, 0) +
+      ai.reduce((sum, a) => sum + a.callsPerDay * a.costMicroUsdPerCall, 0);
+    const dailyPrice = computeUnitCost(1_000, daily, feeBps).costMicroUsd;
+    return [name, {
+      ai,
+      dailyCostMicroUsd: daily,
+      monthlyCostMicroUsd: daily * MONTH_DAYS,
+      monthlyPriceMicroUsd: dailyPrice * MONTH_DAYS,
+      daysFor2Usd: Math.floor(2_000_000 / dailyPrice),
+    }];
+  })) as PriceList['profiles'];
+  return { app, region: file.region, at: t, feeBps, rates, actions, profiles };
+}
+
+/** The list as printed: one line per action, then per profile its month and its AI lines. */
+export function formatPriceList(l: PriceList): string {
+  return [
+    `${l.app} (${l.region}) at ${l.at}: AWS list rates, fee ${l.feeBps / 100}% of cost`,
+    ...l.actions.map((a) => `${a.sku}  per 1,000: ${COMPONENTS.map((k) => `${k} ${formatUsd(a.components[k])}`).join(' ')}` +
+      `  cost ${formatUsd(a.costMicroUsdPerK)}  fee ${formatUsd(a.feeMicroUsdPerK)}  price ${formatUsd(a.priceMicroUsdPerK)}`),
+    '',
+    ...PROFILES.flatMap((name) => {
+      const p = l.profiles[name];
+      return [
+        `${name}  cost ${formatUsd(p.monthlyCostMicroUsd)}/month  price ${formatUsd(p.monthlyPriceMicroUsd)}/month  $2 lasts ${p.daysFor2Usd} days`,
+        ...p.ai.map((a) => `  ${a.sku}  ${a.callsPerDay}/day at ${formatUsd(a.costMicroUsdPerCall)} a call`),
+      ];
+    }),
+  ].join('\n');
+}
+
+/**
+ * Appends a version starting at `validFrom` to each action SKU whose rates differ from its latest
+ * version (creating the file for a new SKU), then writes prices/apps/<app>.list.json. Checks every
+ * file before writing any. Returns the lines to print.
+ */
+export function writePriceList(dir: string, list: PriceList, validFrom: string, now: Date): string[] {
+  // Instances cache price versions for 5 minutes: a version must not start inside that window.
+  if (validFrom < pricingTime(new Date(now.getTime() + 10 * 60_000))) throw new Error(`--valid-from ${validFrom} must be at least 10 minutes ahead`);
+  const writes: [string, string][] = [];
+  const lines: string[] = [];
+  for (const a of list.actions) {
+    const file = path.join(dir, `${a.sku}.json`);
+    const current = existsSync(file) ? parsePriceFile(a.sku, readFileSync(file, 'utf8')) : undefined;
+    const latest = current?.versions.at(-1);
+    if (latest?.microUsdPerKUnits === a.costMicroUsdPerK && isDeepStrictEqual(latest.components, a.components)) {
+      lines.push(`${a.sku} unchanged`);
+      continue;
+    }
+    const { sku: _, ...body } = current ?? { sku: a.sku, provider: 'aws', unit: 'units' as const, versions: [] };
+    const version = { validFrom, microUsdPerKUnits: a.costMicroUsdPerK, components: a.components, source: PRICE_LIST_SOURCE };
+    const text = JSON.stringify({ ...body, versions: [...body.versions, version] }, null, 2) + '\n';
+    parsePriceFile(a.sku, text);
+    writes.push([file, text]);
+    lines.push(`${a.sku}@${validFrom} added`);
+  }
+  writes.push([path.join(dir, 'apps', `${list.app}.list.json`), JSON.stringify({ validFrom, ...list }, null, 2) + '\n']);
+  mkdirSync(path.join(dir, 'apps'), { recursive: true });
+  for (const [file, text] of writes) writeFileSync(file, text);
+  lines.push(`prices/apps/${list.app}.list.json written`);
+  return lines;
 }
 
 const itemOf = (f: PriceFile, v: PriceFile['versions'][number]) => ({ provider: f.provider, ...v });
@@ -225,8 +472,18 @@ export function formatPriceHistory(sku: string, items: Record<string, any>[]): s
 
 async function main(argv: string[]) {
   const [command, ...rest] = argv;
-  const { positional, flags } = parseFlags(rest, { values: ['table', 'keys'], booleans: ['dry-run'] });
-  const usage = 'sync --table <name> [--keys pk,sk] [--dry-run]  |  price-history <sku> --table <name> [--keys pk,sk]';
+  const { positional, flags } = parseFlags(rest, { values: ['table', 'keys', 'valid-from'], booleans: ['dry-run', 'write'] });
+  const usage = 'sync --table <name> [--keys pk,sk] [--dry-run]  |  price-history <sku> --table <name> [--keys pk,sk]  |  list <app> [--write --valid-from <iso>]';
+  if (command === 'list') {
+    if (positional.length !== 1 || (flags.write === true) !== (typeof flags['valid-from'] === 'string')) throw new Error(`Usage: ${usage}`);
+    const app = checkAppId(positional[0]);
+    const file = parseAppFile(app, readFileSync(path.join(PRICES_DIR, 'apps', `${app}.json`), 'utf8'));
+    const now = new Date();
+    const list = priceList(app, file, extractRates(await fetchOffers(file.region)), loadPriceFiles(), now);
+    console.log(formatPriceList(list));
+    if (flags.write) for (const line of writePriceList(PRICES_DIR, list, parseValidFrom(flags['valid-from'] as string), now)) console.log(line);
+    return;
+  }
   if (typeof flags.table !== 'string') throw new Error(`--table is required. Usage: ${usage}`);
   if (typeof flags.keys === 'string') {
     const [pk, sk] = flags.keys.split(',');

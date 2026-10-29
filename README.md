@@ -100,6 +100,30 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <n
 
 **The fee** has one home, `prices/fee.json`: `{ "versions": [{ "validFrom", "feeBps" }] }`, in basis points of cost, versioned like a price (today 10000, 100% of cost, from 2026-10-29). `billing: 'none'` means no fee: v0.3.0 never applies it, and `'hosted'` (which will) is refused until the wallet exists. `sync` skips `fee.json` and `prices/apps/`.
 
+**Reproducing an app's price list.** An app's measurement lives in `prices/apps/<app>.json`: its `region`, per action SKU the measured averages per action (`rru`, `wru`, `apiRequests`, `lambdaRequests`, `billedMs`, `memoryMb`, `logBytes`, from `samples` requests at `measuredAt`), and three profiles, `light`, `regular` and `heavy`, each with actions a day per SKU and AI calls a day per SKU with the average meters of one call:
+
+```json
+{
+  "region": "us-east-1",
+  "actions": {
+    "myapp-add": { "rru": 2, "wru": 3, "apiRequests": 1, "lambdaRequests": 1, "billedMs": 40, "memoryMb": 1024, "logBytes": 2048, "samples": 50, "measuredAt": "2026-11-01T00:00:00Z" }
+  },
+  "profiles": {
+    "light": { "actions": { "myapp-add": 10 }, "ai": { "claude-haiku-5-5": { "callsPerDay": 1, "meters": { "inputTokens": 2000, "outputTokens": 400 } } } },
+    "regular": { "actions": { "myapp-add": 50 }, "ai": { "claude-haiku-5-5": { "callsPerDay": 5, "meters": { "inputTokens": 2000, "outputTokens": 400 } } } },
+    "heavy": { "actions": { "myapp-add": 200 }, "ai": { "claude-haiku-5-5": { "callsPerDay": 20, "meters": { "inputTokens": 2000, "outputTokens": 400 } } } }
+  }
+}
+```
+
+The profiles every app uses: light is 1 AI call and 10 actions a day, regular 5 and 50, heavy 20 and 200. Then, with no AWS credentials:
+
+```sh
+npx tsx node_modules/fair-meter/src/prices-cli.ts list <app> [--write --valid-from <iso>]
+```
+
+`list` downloads the region's public Price List offer files (DynamoDB, Lambda, API Gateway, CloudWatch) and takes each first-tier on-demand list rate, no free tier; a rate it can't find stops the run, naming it. Per action, each component per 1,000 actions, rounded up: database = `rru` plus the write check's half read unit at the read request rate, plus `wru` at the write request rate; API = `apiRequests` at the HTTP API rate; compute = `lambdaRequests` at the Arm request rate plus `billedMs` x `memoryMb` as Arm GB-seconds; logs = `logBytes` ingested plus the same bytes scanned once by the rollup (GB = 2^30 bytes); other = 0. It prints each line (components, cost, fee from `prices/fee.json`, price) and per profile the monthly cost (30 days), the price with the fee and how many days $2 lasts; AI calls are priced at their SKU's current version. `--write` appends a version starting at `--valid-from` to each `prices/<sku>.json` whose rates differ from its latest version (creating the file for a new SKU; a version is never edited), refuses a `validFrom` less than 10 minutes ahead, and writes the published list, `prices/apps/<app>.list.json`. Then `sync`.
+
 ### Known limits (v0.2.0)
 
 - **True-ups don't move `committedMicroUsd`.** After the sweeper's estimate, a late real usage (or a late `not_billed`) corrects the cost with an ADJUST, but that day's cap stays held at the reservation. Conservative: the cap is tighter, never overshot.
