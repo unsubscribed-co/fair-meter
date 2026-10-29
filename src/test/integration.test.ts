@@ -1,5 +1,5 @@
 import { CreateTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { mockClient } from 'aws-sdk-client-mock';
 import { FairMeter, type CallRequest, type FairMeterConfig, type Reservation } from '../fair-meter';
@@ -321,6 +321,7 @@ suite('★ FairMeter against DynamoDB Local', () => {
         day: { spentMicroUsd: 0, heldMicroUsd: 0, capMicroUsd: CAP, roomMicroUsd: CAP, resetsAt: resets.day },
         month: { spentMicroUsd: 0, resetsAt: resets.month },
         tier: 'normal',
+        readOnly: false,
       });
     });
 
@@ -330,6 +331,7 @@ suite('★ FairMeter against DynamoDB Local', () => {
         day: { spentMicroUsd: 0, heldMicroUsd: RESERVED, capMicroUsd: CAP, roomMicroUsd: CAP - RESERVED, resetsAt: resets.day },
         month: { spentMicroUsd: 0, resetsAt: resets.month },
         tier: 'normal',
+        readOnly: false,
       });
     });
 
@@ -361,7 +363,40 @@ suite('★ FairMeter against DynamoDB Local', () => {
         day: { spentMicroUsd: 0, heldMicroUsd: 0, capMicroUsd: CAP, roomMicroUsd: CAP, resetsAt: '2026-11-05T00:00:00.000Z' },
         month: { spentMicroUsd: 440, resetsAt: resets.month },
         tier: 'normal',
+        readOnly: false,
       });
+    });
+  });
+
+  describe('actions: the floor and the write check', () => {
+    const FLOOR = 30_000;
+    const withActions = () => meter({ actions: { skus: ['stacksplit-new-expense'], perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: FLOOR });
+    /** What the rollup will do: an actions EVENT adds its cost to committed (ticket 10). */
+    const rollUp = (person: string, micro: number) => ddb.send(new UpdateCommand({
+      TableName: TABLE, Key: { pk: `USER#${person}`, sk: 'DAILY#stacksplit#2026-11-03' }, UpdateExpression: 'ADD committedMicroUsd :c, costMicroUsd :c', ExpressionAttributeValues: { ':c': micro },
+    }));
+
+    test('AI holds stop at cap - floor while canWrite still allows', async () => {
+      const m = withActions();
+      await rollUp('act-ai@x.co', 500_000 - FLOOR - 2 * RESERVED);
+      expect(await m.authorize(ask('act-ai@x.co'))).toMatchObject({ ok: true });
+      expect(await m.authorize(ask('act-ai@x.co'))).toMatchObject({ ok: true });
+      expect(await m.authorize(ask('act-ai@x.co'))).toMatchObject({ ok: false, status: 429, body: { error: 'daily_limit_reached' } });
+      expect(await day('act-ai@x.co')).toMatchObject({ committedMicroUsd: 500_000 - FLOOR });
+      expect(await m.canWrite('act-ai@x.co')).toEqual({ ok: true });
+      expect(await m.usage('act-ai@x.co')).toMatchObject({ readOnly: false });
+      // Without actions the same person could still hold up to the cap: v0.2.0 is unchanged.
+      expect(await meter().authorize(ask('act-ai@x.co'))).toMatchObject({ ok: true });
+    });
+
+    test('a DAILY row pushed past cap - floor by the rollup: read-only until the next UTC day', async () => {
+      const m = withActions();
+      await rollUp('act-ro@x.co', 500_000 - FLOOR + 1);
+      expect(await m.canWrite('act-ro@x.co')).toEqual({ ok: false, status: 429, body: { error: 'daily_limit_reached', resetsAt: '2026-11-04T00:00:00.000Z' }, headers: {}, tier: 'essential' });
+      expect(await m.usage('act-ro@x.co')).toMatchObject({ readOnly: true });
+      clock = new Date('2026-11-04T00:00:01.000Z');
+      expect(await m.canWrite('act-ro@x.co')).toEqual({ ok: true });
+      expect(await m.usage('act-ro@x.co')).toMatchObject({ readOnly: false });
     });
   });
 

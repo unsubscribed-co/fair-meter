@@ -7,6 +7,16 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import { Metering, MeteringRetry, type MeteringProps } from '../cdk';
 import { EXPORT_COLUMNS, exportRow } from '../export';
 
+// Two action SKUs as the package would ship them (none is published yet): the highest per-action price is 4.2 -> 5 micro-USD.
+const actionSku = (sku: string, ...perK: number[]) => ({
+  sku, provider: 'aws', unit: 'units' as const,
+  versions: perK.map((k, i) => ({ validFrom: `2026-11-0${i + 1}T00:00:00Z`, microUsdPerKUnits: k, components: { database: k, api: 0, compute: 0, logs: 0, other: 0 }, source: 'https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/index.json' })),
+});
+jest.mock('../prices-cli', () => {
+  const actual = jest.requireActual('../prices-cli');
+  return { ...actual, loadPriceFiles: () => [...actual.loadPriceFiles(), actionSku('stacksplit-new-expense', 1_000, 4_200), actionSku('stacksplit-edit-expense', 3_000)] };
+});
+
 const alarmAction = { bind: () => ({ alarmActionArn: 'arn:aws:sns:us-east-2:111111111111:a' }) } as cloudwatch.IAlarmAction;
 
 function synth(props: Partial<MeteringProps> = {}) {
@@ -164,4 +174,55 @@ test('the export gains env, paidBy, estimated and reservedMicroUsd at the end of
   ]);
   const row = exportRow({ PK: 'USER#u', SK: 'EVENT#2026-11-03T14:05:09.120Z#stacksplit#c', appId: 'stacksplit', costMicroUsd: 5, env: 'prod', paidBy: 'credit', estimated: 'swept', reservedMicroUsd: 9 }, 'nieto')!.row;
   expect(row).toMatchObject({ env: 'prod', paidBy: 'credit', estimated: 'swept', reservedMicroUsd: 9 });
+});
+
+describe('actions: the floor and the write check', () => {
+  const skus = ['stacksplit-new-expense', 'stacksplit-edit-expense'];
+  const env = (t: Template, s: cdk.Stack) => JSON.parse(JSON.stringify(s.resolve(Object.entries(t.findResources('AWS::Lambda::Function')).find(([id]) => id.startsWith('Api'))![1].Properties.Environment.Variables.FAIR_METER)));
+
+  test('actions and the floor go into the config: 20 per minute x 30 minutes x concurrency 10 x 5 micro-USD (the defaults)', () => {
+    const { t, s, metering } = synth({ actions: { skus } });
+    expect(metering.config).toMatchObject({ actions: { skus, perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 30_000 });
+    expect(JSON.stringify(env(t, s))).toContain('\\"actionFloorMicroUsd\\":30000');
+    expect(synth({ actions: { skus: ['stacksplit-edit-expense'], perPersonPerMinute: 7, maxConcurrency: 2 } }).metering.config.actionFloorMicroUsd).toBe(7 * 30 * 2 * 3);
+  });
+
+  test('without actions the config has neither', () => {
+    const { t, s, metering } = synth();
+    expect(metering.config).not.toHaveProperty('actions');
+    expect(metering.config).not.toHaveProperty('actionFloorMicroUsd');
+    expect(JSON.stringify(env(t, s))).not.toContain('action');
+  });
+
+  test('ACTION_UNKNOWN joins the metering error terms', () => {
+    synth().t.hasResourceProperties('AWS::Logs::MetricFilter', { FilterPattern: Match.stringLikeRegexp('ACTION_UNKNOWN'), LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') } });
+  });
+
+  test.each([
+    ['an SKU with no price file', { skus: ['stacksplit-nope'] }, /stacksplit-nope/],
+    ['an SKU that is not priced per action', { skus: ['claude-haiku-5-5'] }, /claude-haiku-5-5/],
+    ['no SKUs', { skus: [] }, /skus/],
+    ['a floor not below dailyCapUsd', { skus, perPersonPerMinute: 400 }, /floor/],
+    ['a fractional limit', { skus, perPersonPerMinute: 2.5 }, /perPersonPerMinute/],
+  ])('refused at synth: %s', (_, actions, why) => {
+    expect(() => synth({ actions })).toThrow(why);
+  });
+
+  describe('reserveConcurrency (prod): the granted functions reserve at most maxConcurrency in total', () => {
+    function stack(...reserved: (number | undefined)[]) {
+      const app = new cdk.App({ context: { 'aws:cdk:bundling-stacks': [] } });
+      const s = new cdk.Stack(app, 'S');
+      const metering = new Metering(s, 'Metering', { appId: 'stacksplit', env: 'prod', dailyCapUsd: '0.50', appDailyCapUsd: '5', actions: { skus, reserveConcurrency: true } });
+      return () => reserved.forEach((r, i) => metering.grant(new lambda.Function(s, `Fn${i}`, {
+        runtime: lambda.Runtime.NODEJS_24_X, handler: 'index.handler', code: lambda.Code.fromInline('x'), logGroup: new logs.LogGroup(s, `Logs${i}`), reservedConcurrentExecutions: r,
+      })));
+    }
+
+    test('6 + 4 of 10: synthesizes', () => expect(stack(6, 4)).not.toThrow());
+    test('a granted function without reserved concurrency: refused', () => expect(stack(6, undefined)).toThrow(/reserved concurrency/));
+    test('6 + 5 of 10: refused', () => expect(stack(6, 5)).toThrow(/maxConcurrency/));
+    test('without it (dev: the account limit is the bound) nothing is checked', () => {
+      expect(() => synth({ actions: { skus } })).not.toThrow();
+    });
+  });
 });

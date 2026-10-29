@@ -364,6 +364,149 @@ describe('usage', () => {
   });
 });
 
+describe('actions', () => {
+  const actions = { skus: ['stacksplit-new-expense', 'stacksplit-edit-expense'], perPersonPerMinute: 3, maxConcurrency: 10 };
+  const FLOOR = 30_000;
+  let now: Date;
+  const actionMeter = (cfg: Partial<FairMeterConfig> = { actions, actionFloorMicroUsd: FLOOR }) =>
+    new FairMeter({ ...config, ...cfg }, { ddb: DynamoDBDocumentClient.from(new DynamoDBClient({})), sqs: new SQSClient({}), now: () => now });
+  let lines: string[];
+  beforeEach(() => {
+    now = new Date('2026-11-03T14:05:09.120Z');
+    lines = [];
+    jest.spyOn(process.stdout, 'write').mockImplementation((chunk) => { lines.push(String(chunk)); return true; });
+  });
+
+  describe('action', () => {
+    test('one JSON line straight to stdout, its own log event, and nothing else', () => {
+      const m = actionMeter();
+      expect(m.action({ person: 'ana@x.co', sku: 'stacksplit-new-expense' })).toBeUndefined();
+      m.action({ person: 'ana@x.co', sku: 'stacksplit-edit-expense', n: 40 });
+      expect(lines).toEqual([
+        '{"fairMeter":"action","appId":"stacksplit","env":"prod","person":"ana@x.co","sku":"stacksplit-new-expense","n":1}\n',
+        '{"fairMeter":"action","appId":"stacksplit","env":"prod","person":"ana@x.co","sku":"stacksplit-edit-expense","n":40}\n',
+      ]);
+      expect(ddbMock.calls()).toHaveLength(0);
+      expect(console.error).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['an SKU not configured', { sku: 'stacksplit-delete-group' }],
+      ['n = 0', { n: 0 }],
+      ['n = 1001', { n: 1001 }],
+      ['a fractional n', { n: 1.5 }],
+      ['n as a string', { n: '2' }],
+      ['no person', { person: '' }],
+    ])('%s: ACTION_UNKNOWN (alarms), no line', (_, bad) => {
+      actionMeter().action({ person: 'ana@x.co', sku: 'stacksplit-new-expense', ...bad } as any);
+      expect(lines).toEqual([]);
+      expect(console.error).toHaveBeenCalledWith('ACTION_UNKNOWN', expect.objectContaining({ appId: 'stacksplit' }));
+    });
+
+    test('never throws: no request, no actions configured, stdout failing', () => {
+      expect(() => actionMeter().action(undefined as any)).not.toThrow();
+      expect(() => actionMeter({}).action({ person: 'ana@x.co', sku: 'stacksplit-new-expense' })).not.toThrow();
+      expect(lines).toEqual([]);
+      jest.spyOn(process.stdout, 'write').mockImplementation(() => { throw new Error('EPIPE'); });
+      expect(() => actionMeter().action({ person: 'ana@x.co', sku: 'stacksplit-new-expense' })).not.toThrow();
+      expect(console.error).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('authorize: AI holds cannot use the floor', () => {
+    test('the reserve condition leaves the floor free', async () => {
+      expect(await actionMeter().authorize(ask)).toMatchObject({ ok: true });
+      expect(sentTransactions()[0].TransactItems![1].Update!.ExpressionAttributeValues).toEqual({ ':reserved': 5_798, ':room': 500_000 - FLOOR - 5_798 });
+    });
+
+    test('the pre-check: a hold that would reach into the floor is refused, nothing reserved', async () => {
+      items['USER#ana@x.co|DAILY#stacksplit#2026-11-03'] = { committedMicroUsd: 500_000 - FLOOR - 5_797 };
+      expect(await actionMeter().authorize(ask)).toMatchObject({ ok: false, status: 429, body: { error: 'daily_limit_reached' } });
+      expect(sentTransactions()).toHaveLength(0);
+    });
+
+    test('CALL_EXCEEDS_CAP: a hold that can never fit under cap - floor', async () => {
+      expect(await actionMeter({ actions, actionFloorMicroUsd: 500_000 - 5_797 }).authorize(ask)).toMatchObject({ ok: false, status: 429, body: { error: 'daily_limit_reached' } });
+      expect(console.error).toHaveBeenCalledWith('CALL_EXCEEDS_CAP', expect.objectContaining({ reservedMicroUsd: 5_798, actionFloorMicroUsd: 500_000 - 5_797 }));
+    });
+  });
+
+  test('usage says readOnly once committed is above cap - floor; never without actions', async () => {
+    const day = (committedMicroUsd: number) => ddbMock.on(BatchGetCommand).resolves({ Responses: { t: [{ pk: 'USER#ana@x.co', sk: 'DAILY#stacksplit#2026-11-03', committedMicroUsd }] } });
+    day(500_000 - FLOOR);
+    expect(await actionMeter().usage('ana@x.co')).toMatchObject({ readOnly: false });
+    day(500_000 - FLOOR + 1);
+    expect(await actionMeter().usage('ana@x.co')).toMatchObject({ readOnly: true });
+    day(500_000);
+    expect(await actionMeter({}).usage('ana@x.co')).toMatchObject({ readOnly: false });
+  });
+
+  describe('canWrite', () => {
+    const DAY = 'USER#ana@x.co|DAILY#stacksplit#2026-11-03';
+
+    test("room above the floor: ok, after one eventually consistent GetItem of the person's DAILY row", async () => {
+      items[DAY] = { committedMicroUsd: 500_000 - FLOOR };
+      expect(await actionMeter().canWrite('ana@x.co')).toEqual({ ok: true });
+      expect(ddbMock.calls()).toHaveLength(1);
+      const get = ddbMock.commandCalls(GetCommand)[0].args[0].input;
+      expect(get).toEqual({ TableName: 't', Key: { pk: 'USER#ana@x.co', sk: 'DAILY#stacksplit#2026-11-03' } });
+    });
+
+    test('committed past cap - floor (the rollup pushed it): read-only, 429 daily_limit_reached until 00:00 UTC', async () => {
+      items[DAY] = { committedMicroUsd: 500_000 - FLOOR + 1 };
+      expect(await actionMeter().canWrite('ana@x.co')).toEqual({
+        ok: false, status: 429, body: { error: 'daily_limit_reached', resetsAt: '2026-11-04T00:00:00.000Z' }, headers: {}, tier: 'essential',
+      });
+      expect(console.warn).toHaveBeenCalledWith('LIMIT_REACHED', expect.objectContaining({ person: 'ana@x.co' }));
+    });
+
+    test('over perPersonPerMinute on this instance: 429 too_many_requests, Retry-After to the next minute, RATE_LIMITED, no read', async () => {
+      const m = actionMeter();
+      m.action({ person: 'ana@x.co', sku: 'stacksplit-new-expense', n: 2 });
+      expect(await m.canWrite('ana@x.co')).toEqual({ ok: true });
+      m.action({ person: 'ana@x.co', sku: 'stacksplit-new-expense' });
+      ddbMock.resetHistory();
+      expect(await m.canWrite('ana@x.co')).toEqual({
+        ok: false, status: 429, body: { error: 'too_many_requests', retryAfterSeconds: 51 }, headers: { 'Retry-After': '51' },
+      });
+      expect(console.warn).toHaveBeenCalledWith('RATE_LIMITED', expect.objectContaining({ person: 'ana@x.co', perPersonPerMinute: 3 }));
+      expect(ddbMock.calls()).toHaveLength(0);
+      // Per person, and the next UTC minute starts at zero.
+      expect(await m.canWrite('bo@x.co')).toEqual({ ok: true });
+      now = new Date('2026-11-03T14:06:00.000Z');
+      expect(await m.canWrite('ana@x.co')).toEqual({ ok: true });
+    });
+
+    test('a bulk write passes its n: refused when it would go over the limit', async () => {
+      const m = actionMeter();
+      m.action({ person: 'ana@x.co', sku: 'stacksplit-new-expense', n: 2 });
+      expect(await m.canWrite('ana@x.co', 1)).toEqual({ ok: true });
+      expect(await m.canWrite('ana@x.co', 2)).toMatchObject({ ok: false, status: 429, body: { error: 'too_many_requests' } });
+    });
+
+    test.each([
+      ['an n above perPersonPerMinute (it could never pass)', 'ana@x.co', 4],
+      ['an n of 0', 'ana@x.co', 0],
+      ['no person', '', 1],
+    ])('%s: 500 metering_unavailable, METER_UNAVAILABLE', async (_, person, n) => {
+      expect(await actionMeter().canWrite(person, n)).toEqual({ ok: false, status: 500, body: { error: 'metering_unavailable' }, headers: {} });
+      expect(console.error).toHaveBeenCalledWith('METER_UNAVAILABLE', expect.objectContaining({ reason: expect.any(String) }));
+    });
+
+    test('a read error: 503 metering_unavailable (fail closed)', async () => {
+      ddbMock.on(GetCommand).rejects(new Error('throttled'));
+      expect(await actionMeter().canWrite('ana@x.co')).toEqual({ ok: false, status: 503, body: { error: 'metering_unavailable' }, headers: {} });
+      expect(console.error).toHaveBeenCalledWith('METER_UNAVAILABLE', expect.anything());
+    });
+
+    test('without actions configured: 500 metering_unavailable, METER_UNAVAILABLE, no read', async () => {
+      expect(await actionMeter({}).canWrite('ana@x.co')).toEqual({ ok: false, status: 500, body: { error: 'metering_unavailable' }, headers: {} });
+      expect(console.error).toHaveBeenCalledWith('METER_UNAVAILABLE', expect.anything());
+      expect(ddbMock.calls()).toHaveLength(0);
+    });
+  });
+});
+
 describe('T19: config, refused at startup', () => {
   test.each([
     ["billing 'hosted' (no wallet yet)", { billing: 'hosted' as const }],
@@ -372,6 +515,10 @@ describe('T19: config, refused at startup', () => {
     ['a zero app cap', { appDailyCapMicroUsd: 0 }],
     ['no env', { env: '' }],
     ['bad tiers', { tiers: { savingPct: 90, essentialPct: 75 } }],
+    ['actions without a floor', { actions: { skus: ['a'], perPersonPerMinute: 20, maxConcurrency: 10 } }],
+    ['a floor not below the cap', { actions: { skus: ['a'], perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 500_000 }],
+    ['actions without SKUs', { actions: { skus: [], perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 1 }],
+    ['a zero per-minute limit', { actions: { skus: ['a'], perPersonPerMinute: 0, maxConcurrency: 10 }, actionFloorMicroUsd: 1 }],
   ])('%s', (_, bad) => {
     expect(() => new FairMeter({ ...config, ...bad } as FairMeterConfig)).toThrow();
   });
