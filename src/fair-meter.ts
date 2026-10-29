@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
-import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { assertTierThresholds, budgetTier, DEFAULT_TIER_THRESHOLDS, type BudgetTier, type TierThresholds } from './budget';
 import type { Meters } from './cost';
-import { assertAppId, keys, nextUtcDay, pkNotExists, setTableKeys, skOf, tableKeys, utcDay, type TableKeys } from './keys';
+import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, setTableKeys, skOf, tableKeys, utcDay, utcMonth, type TableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
 import { Meter } from './meter';
 import { priceCall, priceShape, pricingTime, reserveCost, versionCovers, type CallUsage, type PriceShape } from './pricing';
@@ -94,6 +94,13 @@ export interface Refusal {
   headers: Record<string, string>;
   /** Known once the counters were read. */
   tier?: BudgetTier;
+}
+
+/** A person's spend for the app to show them: integer micro-USD and ISO times (UTC). */
+export interface PersonUsage {
+  day: { spentMicroUsd: number; heldMicroUsd: number; capMicroUsd: number; roomMicroUsd: number; resetsAt: string };
+  month: { spentMicroUsd: number; resetsAt: string };
+  tier: BudgetTier;
 }
 
 export type RecordOutcome = 'recorded' | 'duplicate' | 'trued_up' | 'conflict' | 'deferred' | 'failed';
@@ -385,6 +392,37 @@ export class FairMeter {
       await queue().catch((queueErr) => console.error('USAGE_RECORD_FAILED', { record: release, err, queueErr }));
     }
     await queue(60).catch((queueErr) => console.error('USAGE_RECORD_FAILED', { record: release, queueErr, delayed: true }));
+  }
+
+  /**
+   * What the person has spent today and this month, what is held for calls in flight, and the room
+   * left under the daily cap: one strongly consistent read. It moves no money, so a read error rejects.
+   */
+  async usage(person: string): Promise<PersonUsage> {
+    const at = this.now();
+    const dayKey = keys.userDay(person, this.cfg.appId, utcDay(at));
+    const monthKey = keys.userMonth(person, this.cfg.appId, utcMonth(at));
+    const out = await this.ddb.send(new BatchGetCommand({ RequestItems: { [this.cfg.tableName]: { Keys: [dayKey, monthKey], ConsistentRead: true } } }));
+    if (Object.keys(out.UnprocessedKeys ?? {}).length) throw new Error('FairMeter.usage: the read was not processed (throttled)');
+    const rows = out.Responses?.[this.cfg.tableName] ?? [];
+    const sk = tableKeys().sk;
+    const day = rows.find((r) => skOf(r) === dayKey[sk]) ?? {};
+    const month = rows.find((r) => skOf(r) === monthKey[sk]) ?? {};
+    // What the person paid: list-price cost minus the part the operator absorbed.
+    const spent = (row: Record<string, unknown>) => Number(row.costMicroUsd ?? 0) - Number(row.absorbedMicroUsd ?? 0);
+    const committed = Number(day.committedMicroUsd ?? 0);
+    const cap = this.cfg.dailyCapMicroUsd;
+    return {
+      day: {
+        spentMicroUsd: spent(day),
+        heldMicroUsd: Math.max(0, committed - Number(day.costMicroUsd ?? 0)),
+        capMicroUsd: cap,
+        roomMicroUsd: Math.max(0, cap - committed),
+        resetsAt: nextUtcDay(at),
+      },
+      month: { spentMicroUsd: spent(month), resetsAt: nextUtcMonth(at) },
+      tier: budgetTier([{ usedMicroUsd: committed, capMicroUsd: cap }], this.cfg.tiers ?? DEFAULT_TIER_THRESHOLDS),
+    };
   }
 
   private limitReached(log: Record<string, unknown>, at: Date, tier: BudgetTier): Refusal {
