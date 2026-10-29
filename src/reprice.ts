@@ -1,8 +1,8 @@
 import { adjustmentId, checkReason, type Adjustment } from './adjust';
-import { computeCharCost, computeCost, computeRequestCost, computeUnitCost, formatUsd, promptTokens, type Meters } from './cost';
+import { formatUsd, type Meters } from './cost';
 import { ADJUST_PREFIX, EVENT_PREFIX, ledgerTime, pkOf, skOf, subOf } from './keys';
 import type { Billing } from './limits';
-import { pricingTime, scheduleFromItem, selectPrice, versionRanges } from './pricing';
+import { priceCall, pricingTime, versionRanges } from './pricing';
 import { checkAppId, parseFlags } from './report';
 
 /*
@@ -90,6 +90,8 @@ export function repriceEvent(
 ): RepriceResult {
   const sku = eventSku(event);
   if (!sku) return { status: 'unrepriceable', sku: 'unknown', reason: 'no sku or pricing version' };
+  // An estimate's meters are a bound or a guess, and a late true-up may already have corrected it.
+  if (event.estimated !== undefined) return { status: 'unrepriceable', sku, reason: 'estimated usage' };
   const markupBps = count(event.markupBps);
   if (markupBps === undefined) return { status: 'unrepriceable', sku, reason: 'missing markupBps' };
   const at = new Date(ledgerTime(skOf(event)));
@@ -98,36 +100,10 @@ export function repriceEvent(
   if (!version) return { status: 'unrepriceable', sku, reason: `no price version covers ${pricesAt ? '--prices-at' : 'the event time'}` };
   const newPricingVersion = `${sku}@${skOf(version)}`;
 
-  let newCost: number;
-  let band: string | undefined;
-  let tier: string | undefined;
-  if (version.microUsdPerRequest !== undefined) {
-    // One request per event (Places searches, static maps).
-    const rate = count(version.microUsdPerRequest);
-    if (rate === undefined) return { status: 'unrepriceable', sku, reason: 'malformed price version' };
-    newCost = computeRequestCost(1, rate, markupBps).costMicroUsd;
-  } else if (version.microUsdPerMChars !== undefined) {
-    const rate = count(version.microUsdPerMChars);
-    const chars = count(event.chars);
-    if (rate === undefined) return { status: 'unrepriceable', sku, reason: 'malformed price version' };
-    if (chars === undefined) return { status: 'unrepriceable', sku, reason: 'missing meters (chars)' };
-    newCost = computeCharCost(chars, rate, markupBps).costMicroUsd;
-  } else if (version.microUsdPerKUnits !== undefined) {
-    const rate = count(version.microUsdPerKUnits);
-    const units = count(event.units);
-    if (rate === undefined) return { status: 'unrepriceable', sku, reason: 'malformed price version' };
-    if (units === undefined) return { status: 'unrepriceable', sku, reason: 'missing meters (units)' };
-    newCost = computeUnitCost(units, rate, markupBps).costMicroUsd;
-  } else {
-    const schedule = scheduleFromItem(version);
-    if (!schedule) return { status: 'unrepriceable', sku, reason: 'malformed price version' };
-    const meters = storedMeters(event);
-    if (!meters) return { status: 'unrepriceable', sku, reason: 'missing meters (tokens)' };
-    const selected = selectPrice(schedule, at, promptTokens(meters));
-    newCost = computeCost(meters, selected.price, markupBps).costMicroUsd;
-    band = selected.band;
-    tier = selected.tier;
-  }
+  // Events before v0.2.0 are one request each.
+  const priced = priceCall(version, { meters: storedMeters(event), chars: count(event.chars), units: count(event.units), requests: count(event.requests) ?? 1 }, at, markupBps);
+  if ('error' in priced) return { status: 'unrepriceable', sku, reason: priced.error };
+  const { costMicroUsd: newCost, band, tier } = priced;
 
   const old = currentCost(event, prior);
   if (newCost === old.costMicroUsd) return { status: 'unchanged', sku, pricingVersion: newPricingVersion, costMicroUsd: newCost };

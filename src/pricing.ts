@@ -1,4 +1,4 @@
-import { usdToMicroUsd, type Price } from './cost';
+import { computeCharCost, computeCost, computeRequestCost, computeUnitCost, promptTokens, usdToMicroUsd, type Cost, type Meters, type Price } from './cost';
 import { pkOf, skOf } from './keys';
 
 /*
@@ -51,19 +51,20 @@ export interface SelectedPrice {
   tier?: string;
 }
 
+/** The rate card in force at `at` (UTC): the first matching band, else the default card. */
+export function cardAt(schedule: PricingSchedule, at: Date): { card: RateCard; band?: string } {
+  if (schedule.bands.length === 0) return { card: schedule.default };
+  const day = at.getUTCDay();
+  const hour = at.getUTCHours();
+  const match = schedule.bands.find(
+    (b) => b.days.includes(day) && b.hours.some((w) => hour >= w.startHour && hour < w.endHour),
+  );
+  return { card: match ?? schedule.default, band: match ? match.name : DEFAULT_BAND };
+}
+
 /** The rates in force at `at` (UTC) for a call that read `promptTokens` tokens. */
 export function selectPrice(schedule: PricingSchedule, at: Date, promptTokens = 0): SelectedPrice {
-  let card: RateCard = schedule.default;
-  let band: string | undefined;
-  if (schedule.bands.length > 0) {
-    const day = at.getUTCDay();
-    const hour = at.getUTCHours();
-    const match = schedule.bands.find(
-      (b) => b.days.includes(day) && b.hours.some((w) => hour >= w.startHour && hour < w.endHour),
-    );
-    card = match ?? schedule.default;
-    band = match ? match.name : DEFAULT_BAND;
-  }
+  const { card, band } = cardAt(schedule, at);
   const tier = [...(card.tiers ?? [])]
     .sort((a, b) => b.aboveInputTokens - a.aboveInputTokens)
     .find((t) => promptTokens > t.aboveInputTokens);
@@ -145,6 +146,73 @@ export function scheduleFromItem(item: Record<string, any>): PricingSchedule | u
     });
   }
   return { default: base, bands };
+}
+
+// ---------------------------------------------------------------------------------------------
+// One call's price, whatever the version's shape. Recording, reserving and re-pricing all go
+// through here, so they can't drift apart.
+
+/** What a price version charges for, from the rate field it carries. */
+export type PriceShape = 'tokens' | 'chars' | 'units' | 'requests';
+
+/** One call's usage in the price's own unit. */
+export interface CallUsage {
+  meters?: Meters;
+  chars?: number;
+  units?: number;
+  requests?: number;
+}
+
+export type PricedCall = (Cost & { band?: string; tier?: string }) | { error: string };
+
+/** The field that decides the shape, checked in the order re-pricing always used. */
+const SHAPE_FIELDS = [['requests', 'microUsdPerRequest'], ['chars', 'microUsdPerMChars'], ['units', 'microUsdPerKUnits']] as const;
+
+/** The version's shape, or undefined when it is malformed (never guess a price). */
+export function priceShape(version: Record<string, any>): PriceShape | undefined {
+  for (const [shape, field] of SHAPE_FIELDS) if (version[field] !== undefined) return isRate(version[field]) ? shape : undefined;
+  return scheduleFromItem(version) ? 'tokens' : undefined;
+}
+
+export function priceCall(version: Record<string, any>, usage: CallUsage, at: Date, markupBps = 0): PricedCall {
+  for (const [shape, field] of SHAPE_FIELDS) {
+    if (version[field] === undefined) continue;
+    const rate = version[field];
+    const n = usage[shape];
+    if (!isRate(rate)) return { error: 'malformed price version' };
+    if (!isRate(n)) return { error: `missing meters (${shape})` };
+    return shape === 'requests' ? computeRequestCost(n, rate, markupBps)
+      : shape === 'chars' ? computeCharCost(n, rate, markupBps)
+        : computeUnitCost(n, rate, markupBps);
+  }
+  const schedule = scheduleFromItem(version);
+  if (!schedule) return { error: 'malformed price version' };
+  if (!usage.meters) return { error: 'missing meters (tokens)' };
+  const { price, band, tier } = selectPrice(schedule, at, promptTokens(usage.meters));
+  return { ...computeCost(usage.meters, price, markupBps), ...(band ? { band } : {}), ...(tier ? { tier } : {}) };
+}
+
+/**
+ * The most a call within `max` can cost at `at`, in micro-USD; undefined when `max` doesn't fit the
+ * price's shape. Tokens: every input token at the dearest input-side rate (input, cache read or
+ * write) and every output token at the dearest output-side rate (output or reasoning), over the
+ * band's card and all its context tiers, so it bounds whatever usage the provider reports.
+ */
+export function reserveCost(version: Record<string, any>, max: Record<string, unknown>, at: Date): number | undefined {
+  const shape = priceShape(version);
+  const fields = Object.keys(max).sort().join();
+  if (shape === 'tokens') {
+    if (fields !== 'inputTokens,outputTokens' || !isRate(max.inputTokens) || !isRate(max.outputTokens)) return undefined;
+    const { card } = cardAt(scheduleFromItem(version)!, at);
+    const cards: Price[] = [card, ...(card.tiers ?? [])];
+    const inRate = Math.max(...cards.map((c) => Math.max(c.inputMicroUsdPerMTok, c.cachedInputMicroUsdPerMTok, c.cacheWriteMicroUsdPerMTok ?? 0)));
+    const outRate = Math.max(...cards.map((c) => Math.max(c.outputMicroUsdPerMTok, c.reasoningMicroUsdPerMTok ?? 0)));
+    const meters = { inputTokens: max.inputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: max.outputTokens, reasoningTokens: 0 };
+    return computeCost(meters, { inputMicroUsdPerMTok: inRate, cachedInputMicroUsdPerMTok: 0, outputMicroUsdPerMTok: outRate }, 0).costMicroUsd;
+  }
+  if (!shape || fields !== shape) return undefined;
+  const priced = priceCall(version, max as CallUsage, at);
+  return 'error' in priced ? undefined : priced.costMicroUsd;
 }
 
 // ---------------------------------------------------------------------------------------------
