@@ -8,7 +8,7 @@ import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, setTableKeys,
 import { recordUsage, type UsageRecord } from './ledger';
 import { Meter } from './meter';
 import { priceCall, priceShape, pricingTime, reserveCost, versionCovers, type CallUsage, type PriceShape } from './pricing';
-import { isProvider, metersFromUsage, type Provider } from './usage';
+import { canonicalMeters, isProvider, metersFromUsage, type Provider } from './usage';
 
 /*
  * The money path for apps: `authorize` reserves an attempt's highest possible cost against the
@@ -109,10 +109,24 @@ export interface PersonUsage {
   readOnly: boolean;
 }
 
+/**
+ * A `resetsAt` for the person to read: the local clock time and how far away it is, in their
+ * language (from the platform's Intl). The sentence around them stays in the app's own strings.
+ */
+export function resetsAtLocal(resetsAt: string, opts: { locale: string; timeZone: string; now?: Date }): { time: string; relative: string } {
+  const at = new Date(resetsAt);
+  const minutes = (at.getTime() - (opts.now ?? new Date()).getTime()) / 60_000;
+  const [n, unit] = minutes < 60 ? [minutes, 'minute' as const] : minutes < 24 * 60 ? [minutes / 60, 'hour' as const] : [minutes / (24 * 60), 'day' as const];
+  return {
+    time: new Intl.DateTimeFormat(opts.locale, { timeZone: opts.timeZone, hour: 'numeric', minute: '2-digit' }).format(at),
+    relative: new Intl.RelativeTimeFormat(opts.locale, { numeric: 'auto' }).format(Math.round(n), unit),
+  };
+}
+
 export type RecordOutcome = 'recorded' | 'duplicate' | 'trued_up' | 'conflict' | 'deferred' | 'failed';
 
-/** What the app saw of the attempt: the provider's usage block, an estimate, or one of the two words. */
-export type AttemptUsage = object | undefined | 'unknown' | 'not_billed';
+/** What the app saw of the attempt: the provider's usage block, an estimate, or one of the three words. */
+export type AttemptUsage = object | undefined | 'unknown' | 'not_billed' | 'not_sent';
 
 const positive = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
 
@@ -335,10 +349,12 @@ export class FairMeter {
    * usage:
    *  - the provider's own usage block (read by the adapter of the price's provider), or
    *    { chars } | { units } | { requests } for other prices;
-   *  - { estimate: <the same shape> }: the app's guess for an attempt it aborted (a hedge loser),
-   *    settled at that cost, estimated 'aborted', no alarm;
+   *  - { estimate: <the same shape, or canonical meters { inputTokens, outputTokens, cacheReadTokens?,
+   *    cacheWriteTokens?, reasoningTokens? }> }: the app's guess for an attempt it aborted (a hedge
+   *    loser), settled at that cost, estimated 'aborted', no alarm;
    *  - 'unknown': aborted or lost with no guess; settled at the reservation, estimated 'aborted';
    *  - 'not_billed': the provider answered with an error status it doesn't bill; the hold is released;
+   *  - 'not_sent': the app never called the provider; released exactly like 'not_billed' (the same record);
    *  - undefined or malformed: settled at the reservation, estimated 'no_usage', USAGE_MISSING (alarms).
    */
   async record(call: Reservation, usage: AttemptUsage): Promise<RecordOutcome> {
@@ -377,11 +393,13 @@ export class FairMeter {
     const at = new Date(h.at);
     if (!h.price || Number.isNaN(at.getTime()) || typeof h.reservedMicroUsd !== 'number') throw new Error('Unreadable hold');
     const facts = { appId: this.cfg.appId, env: this.cfg.env, callId: call.callId, hold: h };
-    if (usage === 'not_billed') return holdRecord(facts, 'release');
+    if (usage === 'not_billed' || usage === 'not_sent') return holdRecord(facts, 'release');
     if (usage === 'unknown') return holdRecord(facts, 'aborted');
     const estimate = typeof usage === 'object' && usage !== null && 'estimate' in usage;
     const given = estimate ? (usage as { estimate: unknown }).estimate : usage;
-    const callUsage = priceShape(h.price) === 'tokens' ? { meters: metersFromUsage(h.provider as Provider, given) } : given;
+    const canonical = estimate && typeof given === 'object' && given !== null && 'inputTokens' in given;
+    const meters = () => (canonical ? canonicalMeters(given as Record<string, unknown>) : metersFromUsage(h.provider as Provider, given));
+    const callUsage = priceShape(h.price) === 'tokens' ? { meters: meters() } : given;
     const priced = typeof callUsage === 'object' && callUsage !== null ? priceCall(h.price, callUsage as CallUsage, at) : undefined;
     if (!priced || 'error' in priced) {
       console.error('USAGE_MISSING', { appId: this.cfg.appId, callId: call.callId, person: h.person, sku: h.sku, estimate, error: priced && 'error' in priced ? priced.error : 'no usage' });

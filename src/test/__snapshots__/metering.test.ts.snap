@@ -125,6 +125,9 @@ exports[`MeteringRetry with an alarmAction: v0.2.0's template (Nieto's construct
         },
         "Environment": {
           "Variables": {
+            "DLQ_URL": {
+              "Ref": "RetryDlqA4A2D928",
+            },
             "NODE_OPTIONS": "--enable-source-maps",
             "TABLE_NAME": {
               "Ref": "TD925BC7E",
@@ -212,6 +215,20 @@ exports[`MeteringRetry with an alarmAction: v0.2.0's template (Nieto's construct
               "Resource": {
                 "Fn::GetAtt": [
                   "RetryQueueFFB8122F",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "RetryDlqA4A2D928",
                   "Arn",
                 ],
               },
@@ -305,6 +322,192 @@ exports[`MeteringRetry with an alarmAction: v0.2.0's template (Nieto's construct
         ],
       },
       "Type": "AWS::SQS::QueuePolicy",
+    },
+    "RetryRedrive94A3CBBD": {
+      "DependsOn": [
+        "RetryRedriveServiceRoleDefaultPolicy8F3F72DA",
+        "RetryRedriveServiceRoleEA53422F",
+      ],
+      "Properties": {
+        "Architectures": [
+          "arm64",
+        ],
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "DLQ_URL": {
+              "Ref": "RetryDlqA4A2D928",
+            },
+            "NODE_OPTIONS": "--enable-source-maps",
+            "QUEUE_URL": {
+              "Ref": "RetryQueueFFB8122F",
+            },
+            "TABLE_NAME": {
+              "Ref": "TD925BC7E",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogFormat": "JSON",
+          "LogGroup": {
+            "Ref": "RetryRedriveLogsA21CBB61",
+          },
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "RetryRedriveServiceRoleEA53422F",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 300,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "RetryRedriveLogsA21CBB61": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "RetryRedriveScheduleAllowEventRuleSRetryRedrive3E0BF299D02E3E6A": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "RetryRedrive94A3CBBD",
+            "Arn",
+          ],
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "RetryRedriveScheduleE18FA847",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "RetryRedriveScheduleE18FA847": {
+      "Properties": {
+        "Description": "Put valid usage records parked in the metering DLQ back on the retry queue",
+        "ScheduleExpression": "cron(0 4 * * ? *)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "RetryRedrive94A3CBBD",
+                "Arn",
+              ],
+            },
+            "Id": "Target0",
+            "RetryPolicy": {
+              "MaximumRetryAttempts": 2,
+            },
+          },
+        ],
+      },
+      "Type": "AWS::Events::Rule",
+    },
+    "RetryRedriveServiceRoleDefaultPolicy8F3F72DA": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:UpdateItem",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "TD925BC7E",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "RetryDlqA4A2D928",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "RetryQueueFFB8122F",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "RetryRedriveServiceRoleDefaultPolicy8F3F72DA",
+        "Roles": [
+          {
+            "Ref": "RetryRedriveServiceRoleEA53422F",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "RetryRedriveServiceRoleEA53422F": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
     },
     "TD925BC7E": {
       "DeletionPolicy": "Retain",
