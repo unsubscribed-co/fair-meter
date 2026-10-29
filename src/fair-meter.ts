@@ -124,6 +124,9 @@ export function resetsAtLocal(resetsAt: string, opts: { locale: string; timeZone
   };
 }
 
+/** The public methods of FairMeter: inject this type to swap in `FakeFairMeter` (fair-meter/testing) in tests. */
+export type FairMeterApi = Pick<FairMeter, 'authorize' | 'record' | 'usage' | 'canWrite' | 'action'>;
+
 export type RecordOutcome = 'recorded' | 'duplicate' | 'trued_up' | 'conflict' | 'deferred' | 'failed';
 
 /** What the app saw of the attempt: the provider's usage block, an estimate, or one of the three words. */
@@ -361,7 +364,7 @@ export class FairMeter {
   async record(call: Reservation, usage: AttemptUsage): Promise<RecordOutcome> {
     let r: UsageRecord;
     try {
-      r = this.settlement(call, usage);
+      r = settlementRecord(this.cfg, call, usage);
     } catch (err) {
       console.error('USAGE_RECORD_FAILED', { appId: this.cfg.appId, callId: call?.callId, call, usage, err });
       return 'failed';
@@ -388,38 +391,13 @@ export class FairMeter {
     }
   }
 
-  /** The UsageRecord that settles (or releases) this call. Throws only on a hold it can't read. */
-  private settlement(call: Reservation, usage: AttemptUsage): UsageRecord {
-    const h = call.hold;
-    const at = new Date(h.at);
-    if (!h.price || Number.isNaN(at.getTime()) || typeof h.reservedMicroUsd !== 'number') throw new Error('Unreadable hold');
-    const facts = { appId: this.cfg.appId, env: this.cfg.env, callId: call.callId, hold: h };
-    if (usage === 'not_billed' || usage === 'not_sent') return holdRecord(facts, 'release');
-    if (usage === 'unknown') return holdRecord(facts, 'aborted');
-    const estimate = typeof usage === 'object' && usage !== null && 'estimate' in usage;
-    const given = estimate ? (usage as { estimate: unknown }).estimate : usage;
-    const canonical = estimate && typeof given === 'object' && given !== null && 'inputTokens' in given;
-    const meters = () => (canonical ? canonicalMeters(given as Record<string, unknown>) : metersFromUsage(h.provider as Provider, given));
-    const callUsage = priceShape(h.price) === 'tokens' ? { meters: meters() } : given;
-    const priced = typeof callUsage === 'object' && callUsage !== null ? priceCall(h.price, callUsage as CallUsage, at) : undefined;
-    if (!priced || 'error' in priced) {
-      console.error('USAGE_MISSING', { appId: this.cfg.appId, callId: call.callId, person: h.person, sku: h.sku, estimate, error: priced && 'error' in priced ? priced.error : 'no usage' });
-      return holdRecord(facts, estimate ? 'aborted' : 'no_usage');
-    }
-    if (priced.costMicroUsd > h.reservedMicroUsd) {
-      // The only sign the cap was overshot (max didn't bound the real usage): it alarms.
-      console.error('RESERVATION_EXCEEDED', { appId: this.cfg.appId, callId: call.callId, person: h.person, sku: h.sku, costMicroUsd: priced.costMicroUsd, reservedMicroUsd: h.reservedMicroUsd });
-    }
-    return holdRecord(facts, { usage: callUsage as CallUsage, ...priced }, estimate ? 'aborted' : undefined);
-  }
-
   /**
    * A hold that may exist although authorize refused (the provider is never called): released
    * now, and again from the queue a minute later in case the reserve commits after this release.
    * The sweeper must never settle a call that wasn't made.
    */
   private async giveBack(call: Reservation) {
-    const release = this.settlement(call, 'not_billed');
+    const release = settlementRecord(this.cfg, call, 'not_billed');
     const queue = (DelaySeconds?: number) =>
       this.sqs.send(new SendMessageCommand({ QueueUrl: this.cfg.retryQueueUrl, MessageBody: JSON.stringify(release), ...(DelaySeconds ? { DelaySeconds } : {}) }));
     try {
@@ -565,6 +543,31 @@ export class FairMeter {
   private async get(key: Record<string, string>) {
     return (await this.ddb.send(new GetCommand({ TableName: this.cfg.tableName, Key: key, ConsistentRead: true }))).Item;
   }
+}
+
+/** The UsageRecord that settles (or releases) this call (FairMeter.record and FakeFairMeter). Throws only on a hold it can't read. */
+export function settlementRecord(cfg: Pick<FairMeterConfig, 'appId' | 'env'>, call: Reservation, usage: AttemptUsage): UsageRecord {
+  const h = call.hold;
+  const at = new Date(h.at);
+  if (!h.price || Number.isNaN(at.getTime()) || typeof h.reservedMicroUsd !== 'number') throw new Error('Unreadable hold');
+  const facts = { appId: cfg.appId, env: cfg.env, callId: call.callId, hold: h };
+  if (usage === 'not_billed' || usage === 'not_sent') return holdRecord(facts, 'release');
+  if (usage === 'unknown') return holdRecord(facts, 'aborted');
+  const estimate = typeof usage === 'object' && usage !== null && 'estimate' in usage;
+  const given = estimate ? (usage as { estimate: unknown }).estimate : usage;
+  const canonical = estimate && typeof given === 'object' && given !== null && 'inputTokens' in given;
+  const meters = () => (canonical ? canonicalMeters(given as Record<string, unknown>) : metersFromUsage(h.provider as Provider, given));
+  const callUsage = priceShape(h.price) === 'tokens' ? { meters: meters() } : given;
+  const priced = typeof callUsage === 'object' && callUsage !== null ? priceCall(h.price, callUsage as CallUsage, at) : undefined;
+  if (!priced || 'error' in priced) {
+    console.error('USAGE_MISSING', { appId: cfg.appId, callId: call.callId, person: h.person, sku: h.sku, estimate, error: priced && 'error' in priced ? priced.error : 'no usage' });
+    return holdRecord(facts, estimate ? 'aborted' : 'no_usage');
+  }
+  if (priced.costMicroUsd > h.reservedMicroUsd) {
+    // The only sign the cap was overshot (max didn't bound the real usage): it alarms.
+    console.error('RESERVATION_EXCEEDED', { appId: cfg.appId, callId: call.callId, person: h.person, sku: h.sku, costMicroUsd: priced.costMicroUsd, reservedMicroUsd: h.reservedMicroUsd });
+  }
+  return holdRecord(facts, { usage: callUsage as CallUsage, ...priced }, estimate ? 'aborted' : undefined);
 }
 
 /** Why a request from an untyped caller can't be served, or undefined. */
