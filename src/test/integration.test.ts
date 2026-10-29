@@ -4,7 +4,8 @@ import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { mockClient } from 'aws-sdk-client-mock';
 import { FairMeter, type CallRequest, type FairMeterConfig, type Reservation } from '../fair-meter';
 import { setTableKeys } from '../keys';
-import { loadPriceFiles, syncPrices } from '../prices-cli';
+import { syncPrices } from '../prices-cli';
+import { loadPriceFiles } from '../prices';
 import { sweep } from '../sweep-handler';
 
 /*

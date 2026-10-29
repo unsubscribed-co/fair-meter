@@ -8,7 +8,8 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, TransactGetCommand, Tra
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { FairMeter, type FairMeterConfig } from '../fair-meter';
 import { measureCapacity } from '../measure';
-import { measureApp, parseAppFile } from '../prices-cli';
+import { measureApp } from '../prices-cli';
+import { parseAppFile } from '../prices';
 
 const config: FairMeterConfig = {
   appId: 'stacksplit',

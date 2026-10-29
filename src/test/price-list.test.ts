@@ -1,7 +1,8 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { extractRates, formatPriceList, OFFER_SERVICES, parseAppFile, parsePriceFile, priceList, writePriceList, type PriceFile } from '../prices-cli';
+import { extractRates, formatPriceList, OFFER_SERVICES, priceList, writePriceList } from '../prices-cli';
+import { parseAppFile, parsePriceFile, type PriceFile } from '../prices';
 
 /** Trimmed from AWS's public us-east-1 offer files: the products the list needs, plus look-alikes it must skip. */
 const offers = () => Object.fromEntries(OFFER_SERVICES.map((s) => [s, JSON.parse(readFileSync(path.join(__dirname, 'fixtures', 'price-list', `${s}.json`), 'utf8'))]));

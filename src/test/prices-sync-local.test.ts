@@ -1,6 +1,7 @@
 import { CreateTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { formatPriceHistory, parsePriceFile, syncPrices } from '../prices-cli';
+import { formatPriceHistory, syncPrices } from '../prices-cli';
+import { parsePriceFile } from '../prices';
 import { priceCall } from '../pricing';
 
 /* An action SKU (components) synced into a table with the default keys, against DynamoDB Local. Skipped unless DYNAMODB_ENDPOINT is set. */

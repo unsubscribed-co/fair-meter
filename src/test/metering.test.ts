@@ -12,8 +12,8 @@ const actionSku = (sku: string, ...perK: number[]) => ({
   sku, provider: 'aws', unit: 'units' as const,
   versions: perK.map((k, i) => ({ validFrom: `2026-11-0${i + 1}T00:00:00Z`, microUsdPerKUnits: k, components: { database: k, api: 0, compute: 0, logs: 0, other: 0 }, source: 'https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/index.json' })),
 });
-jest.mock('../prices-cli', () => {
-  const actual = jest.requireActual('../prices-cli');
+jest.mock('../prices', () => {
+  const actual = jest.requireActual('../prices');
   return { ...actual, loadPriceFiles: () => [...actual.loadPriceFiles(), actionSku('stacksplit-new-expense', 1_000, 4_200), actionSku('stacksplit-edit-expense', 3_000)] };
 });
 

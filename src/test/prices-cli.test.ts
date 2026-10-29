@@ -5,7 +5,8 @@ import { setTableKeys } from '../keys';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { feeAt, formatPriceHistory, loadPriceFiles, parseFeeFile, parsePriceFile, syncPrices, type PriceFile } from '../prices-cli';
+import { formatPriceHistory, syncPrices } from '../prices-cli';
+import { feeAt, loadPriceFiles, parseFeeFile, parsePriceFile, type PriceFile } from '../prices';
 import { priceShape } from '../pricing';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);

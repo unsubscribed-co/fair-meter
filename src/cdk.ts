@@ -21,7 +21,7 @@ import { usdToMicroUsd } from './cost';
 import { EXPORT_COLUMNS, streamFilterPattern } from './export';
 import type { FairMeterConfig } from './fair-meter';
 import { assertAppId, DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
-import { loadPriceFiles } from './prices-cli';
+import { loadPriceFiles } from './prices';
 import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
 
 // esbuild skips tsconfig files inside node_modules, so name ours or the handlers lose "use strict" in an app's bundle.

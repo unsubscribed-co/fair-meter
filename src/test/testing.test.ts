@@ -4,7 +4,8 @@ import { SQSClient } from '@aws-sdk/client-sqs';
 import * as root from '../index';
 import { FairMeter, type CallRequest, type FairMeterApi, type FairMeterConfig, type Reservation } from '../fair-meter';
 import { recordUsage } from '../ledger';
-import { loadPriceFiles, syncPrices } from '../prices-cli';
+import { syncPrices } from '../prices-cli';
+import { loadPriceFiles } from '../prices';
 import { FakeFairMeter } from '../testing';
 
 /*

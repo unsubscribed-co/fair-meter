@@ -3,7 +3,7 @@ import { budgetTier, DEFAULT_TIER_THRESHOLDS, type TierThresholds } from './budg
 import { settlementRecord, type AttemptUsage, type CallRequest, type FairMeterApi, type FairMeterConfig, type Hold, type PersonUsage, type RecordOutcome, type Refusal, type RefusalCode, type Reservation } from './fair-meter';
 import { nextUtcDay, nextUtcMonth, utcDay, utcMinute, utcMonth } from './keys';
 import { absorbedOf } from './ledger';
-import { loadPriceFiles, type PriceFile } from './prices-cli';
+import { loadPriceFiles, type PriceFile } from './prices';
 import { pricingTime, reserveCost } from './pricing';
 
 /*

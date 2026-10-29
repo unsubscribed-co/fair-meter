@@ -2,7 +2,8 @@ import { CloudWatchLogsClient, GetQueryResultsCommand, StartQueryCommand } from 
 import { CreateTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
-import { parsePriceFile, syncPrices } from '../prices-cli';
+import { syncPrices } from '../prices-cli';
+import { parsePriceFile } from '../prices';
 import { FairMeter } from '../fair-meter';
 import { actionQuery, rollup } from '../rollup-handler';
 
