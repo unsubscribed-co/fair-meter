@@ -117,7 +117,7 @@ describe('constructs', () => {
   test('table keys, metric namespace and export appIds reach the template', () => {
     const t = stack({ tableKeys: STACKSPLIT, metricNamespace: 'StackSplit' });
     const env = Object.values(t.findResources('AWS::Lambda::Function')).map((f) => f.Properties.Environment.Variables);
-    expect(env).toHaveLength(3);
+    expect(env).toHaveLength(4);
     for (const v of env) expect(JSON.parse(v.METERING_TABLE_KEYS)).toEqual(STACKSPLIT);
     t.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
       FilterCriteria: { Filters: [{ Pattern: JSON.stringify(streamFilterPattern('sk')) }] },

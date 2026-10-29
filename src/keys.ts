@@ -18,6 +18,8 @@
  *   GLOBAL            DAILY#<YYYY-MM-DD>              counters (all-apps ceiling)
  *   PENDING#<app>     CALL#<callId>                   FairMeter: one open reservation per provider attempt, deleted
  *                                                     when it is settled (EVENT put in the same transaction) or released
+ *   REDRIVE#<app>     CALL#<callId>                   redrives: times the nightly redrive put this call's record back
+ *                                                     on the retry queue (at most 3); expiresAt (TTL, 30 days)
  *   PRICING#<sku>     <validFrom>                     price versions, shared by all apps
  *   PLANDEF#<app>#<plan> <validFrom>                  plan definition versions (what a plan includes per budget mode),
  *                                                     immutable like prices: validFrom, validTo, grid (the app's own shape)
@@ -122,6 +124,8 @@ export const keys = {
   providerMonth: (provider: string, month: string) => key(`PROVIDER#${provider}`, `MONTH#${month}`),
   /** One open FairMeter reservation; the sweeper reads the app's whole partition. */
   pending: (appId: string, callId: string) => key(`PENDING#${appId}`, `CALL#${callId}`),
+  /** How many times the nightly redrive has put this call's record back on the retry queue. */
+  redrive: (appId: string, callId: string) => key(`REDRIVE#${appId}`, `CALL#${callId}`),
   /**
    * One immutable version of a plan's definition for one app, valid in [validFrom, validTo) like a
    * price version (validFrom = SK, canonical UTC to the second). Version id: `<plan>@<SK>`.

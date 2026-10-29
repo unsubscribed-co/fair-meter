@@ -90,6 +90,8 @@ metering.grant(fn); // IAM on the ledger table, the FAIR_METER env, an alarm on 
 
 It creates the ledger table, `metering.table` and a stack output: on-demand, `PK`/`SK`, TTL on `expiresAt`, point-in-time recovery, deletion protected and retained when the stack is deleted. Prices, counters, holds and the ledger live there, nothing of your app's; your `authorize` and `record` code needs no table settings. It also creates the retry queue and its Lambda (`MeteringRetry`, DLQ alarms on depth and on a 7-day-old message) and the sweeper: every 10 minutes it settles holds left open for 30 minutes (a crash between authorize and the settle) at their reservation, `estimated: 'swept'`, and alarms. Give `fn` its own `logGroup`. Optional: `alarmAction` (without it the alarms exist with no action, fine for dev), `allAppsDailyCapUsd`, `maxCallsPerMinute`, `tiers`. `billing: 'hosted'` is refused until the wallet exists.
 
+**The retry queue** (`MeteringRetry`, also under `Metering`): a record the app couldn't write waits on the queue and is retried every minute; one that still fails after 10 receives is parked in the DLQ. A message that can never be recorded (not JSON, no `appId`/`sub`/`requestId`/`requestTime`, or no transaction can be built from it) is parked at once, logged `USAGE_RECORD_PARKED` (an error that alarms under `Metering`). Every night at 04:00 UTC a redrive Lambda drains the DLQ: each valid record goes back on the retry queue, at most 3 times per call, counted on `REDRIVE#<app>` / `CALL#<callId>` (kept 30 days); recording is idempotent, so a record already in the ledger ends `duplicate`. Invalid records stay, and so does a call at its third redrive (logged `REDRIVE_LIMIT`), so the DLQ alarms stay on. The manual step when that happens: read the message in the SQS console, fix the cause (bad data, a missing price, a table permission), then redrive it from the console (not counted) or delete it if it must never be recorded; the DLQ drops it 14 days after its first enqueue.
+
 **Prices** live in this repo, `prices/<sku>.json`, one file per SKU: `provider`, `unit` (`tokens`, `chars`, `units`, `requests`) and immutable `versions`, each with `validFrom`, the rates in PRICING item fields (integer micro-USD) and the provider's pricing page as `source`. To put them in the ledger table (its name is the stack output):
 
 ```
@@ -179,7 +181,8 @@ What it does:
   `outputTokens`, `reasoningTokens` (non-overlapping).
 - **Exactly-once recording** (`ledger.ts`): event + all counters in one DynamoDB transaction,
   conditional on a deterministic event key, plus an idempotency token. Failed writes go to an
-  SQS retry queue (`retry-handler.ts`, `cdk.ts`) with a dead-letter queue that alarms.
+  SQS retry queue (`retry-handler.ts`, `cdk.ts`) with a dead-letter queue that alarms and a
+  nightly redrive (`redrive-handler.ts`).
 - **Reports** (`report.ts`): flag parsing, plan updates and spend aggregation for an admin CLI.
 - **Adjustments** (`adjust.ts`): the correcting half of the cost ledger. EVENT items (charges)
   never change; a correction is an immutable `ADJUST#<event-time>#<app>#<id>` item with a signed
