@@ -271,3 +271,40 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect((await events('t18@x.co'))[0].sk).toMatch(/^EVENT#2026-11-30T23:59:59.900Z#/);
   });
 });
+
+suite('★ the ledger table Metering creates: default keys, no setTableKeys', () => {
+  const LEDGER = `fair-meter-ledger-it-${Date.now()}`;
+  const ledgerConfig: FairMeterConfig = { appId: 'stacksplit', env: 'prod', tableName: LEDGER, retryQueueUrl: 'https://sqs/never-used', dailyCapMicroUsd: 500_000, appDailyCapMicroUsd: 100_000_000 };
+  const at = new Date('2026-11-03T14:05:09.120Z');
+  const ledgerMeter = () => new FairMeter(ledgerConfig, { ddb, sqs: new SQSClient({ region: 'us-east-1' }), now: () => at });
+  const rows = async (person: string) =>
+    (await ddb.send(new QueryCommand({ TableName: LEDGER, KeyConditionExpression: 'PK = :pk', ExpressionAttributeValues: { ':pk': `USER#${person}` }, ConsistentRead: true }))).Items ?? [];
+
+  beforeAll(async () => {
+    // Metering's table: PK / SK, nothing else.
+    await raw.send(new CreateTableCommand({
+      TableName: LEDGER,
+      BillingMode: 'PAY_PER_REQUEST',
+      AttributeDefinitions: [{ AttributeName: 'PK', AttributeType: 'S' }, { AttributeName: 'SK', AttributeType: 'S' }],
+      KeySchema: [{ AttributeName: 'PK', KeyType: 'HASH' }, { AttributeName: 'SK', KeyType: 'RANGE' }],
+    }));
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    await syncPrices(ddb, LEDGER, loadPriceFiles(), new Date('2026-10-28T12:00:00Z'), false);
+  });
+  beforeEach(() => jest.spyOn(console, 'error').mockImplementation(() => {}));
+  afterEach(() => jest.restoreAllMocks());
+
+  test('authorize, record and the sweeper', async () => {
+    const settled = (await ledgerMeter().authorize(ask('l1@x.co'))) as Reservation;
+    expect(await ledgerMeter().record(settled, usage)).toBe('recorded');
+    const crashed = (await ledgerMeter().authorize(ask('l1@x.co'))) as Reservation;
+    expect(await sweep(ddb, ledgerConfig, new Date(at.getTime() + 31 * 60_000))).toEqual({ settled: 1 });
+
+    const items = await rows('l1@x.co');
+    expect(items.filter((i) => i.SK.startsWith('EVENT#'))).toEqual(expect.arrayContaining([
+      expect.objectContaining({ requestId: settled.callId, costMicroUsd: 440 }),
+      expect.objectContaining({ requestId: crashed.callId, costMicroUsd: RESERVED, estimated: 'swept' }),
+    ]));
+    expect(items.find((i) => i.SK === 'DAILY#stacksplit#2026-11-03')).toMatchObject({ costMicroUsd: 440 + RESERVED, committedMicroUsd: 440 + RESERVED });
+  });
+});
