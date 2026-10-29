@@ -185,6 +185,13 @@ describe('planReprice', () => {
     expect(text).toContain('missing meters (tokens)');
   });
 
+  test('swept and aborted EVENTs are left as charged: absorbed stays equal to cost, never shifted onto the person', () => {
+    const absorbed = (estimated: string) => legacyChat(SATURDAY_NOON, { SK: `EVENT#${SATURDAY_NOON}#${estimated}`, estimated, absorbedMicroUsd: 594 });
+    const plan = planReprice({ ...base, events: [absorbed('swept'), absorbed('aborted')] });
+    expect(plan.adjustments).toEqual([]);
+    expect(plan.unrepriceable.map((u) => u.reason)).toEqual(['estimated usage', 'estimated usage']);
+  });
+
   test("billing 'none': corrections of plan-less events never touch credit", () => {
     expect(planReprice({ ...base, billing: 'none' }).adjustments.map((a) => a.deductCredit)).toEqual([false, false]);
   });

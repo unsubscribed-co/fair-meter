@@ -80,3 +80,15 @@ export function metersFromUsage(provider: Provider, usage: unknown): Meters | un
   if (typeof usage !== 'object' || usage === null) return undefined;
   return ADAPTERS[provider](usage as Record<string, any>);
 }
+
+/** Meters the app states itself (an estimate): inputTokens and outputTokens, the rest optional (0). */
+export function canonicalMeters(u: Record<string, unknown>): Meters | undefined {
+  const m = {
+    inputTokens: count(u.inputTokens),
+    cacheReadTokens: count(u.cacheReadTokens ?? 0),
+    cacheWriteTokens: count(u.cacheWriteTokens ?? 0),
+    outputTokens: count(u.outputTokens),
+    reasoningTokens: count(u.reasoningTokens ?? 0),
+  };
+  return Object.values(m).includes(undefined) ? undefined : (m as Meters);
+}
