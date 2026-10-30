@@ -246,18 +246,27 @@ describe('hosted billing: { walletTable }', () => {
     expect(metering.config.billing).toEqual({ walletTable: 'wallet', fee: { versions: [{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000 }] } });
   });
 
-  test.each(['ApiServiceRoleDefaultPolicy', 'MeteringSweeperServiceRoleDefaultPolicy', 'MeteringRetryFnServiceRoleDefaultPolicy', 'MeteringRollupServiceRoleDefaultPolicy'])(
-    '%s: GetItem and UpdateItem on WALLET# and LINK# for the counters, its own SPEND counter and the link fields; PutItem on PASS# only; nothing else',
-    (prefix) => {
-      expect(walletStatements(hosted().t, prefix)).toEqual([
-        {
-          Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'], Resource: WALLET_ARN,
-          Condition: scoped(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'links', 'email', 'lang', 'movedTo', 'account']),
-        },
-        { Effect: 'Allow', Action: 'dynamodb:PutItem', Resource: WALLET_ARN, Condition: scoped(['PASS#*'], ['account', 'expiresAt']) },
-      ]);
-    },
-  );
+  const get = (leadingKeys: string[], attributes: string[]) => ({ Effect: 'Allow', Action: 'dynamodb:GetItem', Resource: WALLET_ARN, Condition: scoped(leadingKeys, attributes) });
+  const update = (leadingKeys: string[], attributes: string[]) => ({ Effect: 'Allow', Action: 'dynamodb:UpdateItem', Resource: WALLET_ARN, Condition: scoped(leadingKeys, attributes) });
+
+  test("the app's functions (wallet ADR 0001): read the guard, the link and movedTo; update the counters, its own SPEND counter and the link fields, never movedTo; PutItem on PASS# only", () => {
+    expect(walletStatements(hosted().t, 'ApiServiceRoleDefaultPolicy')).toEqual([
+      get(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'account', 'email', 'lang', 'movedTo']),
+      update(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'links', 'email', 'lang', 'account']),
+      { Effect: 'Allow', Action: 'dynamodb:PutItem', Resource: WALLET_ARN, Condition: scoped(['PASS#*'], ['account', 'expiresAt']) },
+    ]);
+  });
+
+  test.each([
+    // A swept hold is absorbed: it only gives the hold back.
+    ['MeteringSweeperServiceRoleDefaultPolicy', [update(['WALLET#*'], ['availableMicroUsd', 'heldMicroUsd'])]],
+    // A queued settle or release: the hold back, the charge spent and added to SPEND.
+    ['MeteringRetryFnServiceRoleDefaultPolicy', [update(['WALLET#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit'])]],
+    // Reads available, then charges it (no hold).
+    ['MeteringRollupServiceRoleDefaultPolicy', [get(['WALLET#*'], ['availableMicroUsd']), update(['WALLET#*'], ['availableMicroUsd', 'spentMicroUsd', 'stacksplit'])]],
+  ])('%s: only the wallet counters it moves, on WALLET# only: no LINK#, no PASS#, no labels', (prefix, expected) => {
+    expect(walletStatements(hosted().t, prefix)).toEqual(expected);
+  });
 
   test('its error terms join the metering error alarm', () => {
     hosted().t.hasResourceProperties('AWS::Logs::MetricFilter', {

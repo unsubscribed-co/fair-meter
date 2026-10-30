@@ -620,27 +620,38 @@ const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED',
 const WALLET_ERRORS = ['FLOOR_OVERRUN', 'ACCOUNT_NOT_LINKED', 'LINK_CONFLICT', 'BALANCE_MISSING', 'MOVE_CHAIN_TOO_LONG'];
 
 /**
- * What an app's code may do on the wallet table (wallet ADR 0001): read and conditionally ADD to the
- * guard and spend counters, its own SPEND# counter and the link fields, under WALLET# and LINK#
- * only; write PASS# rows. Never read a whole item, never return old or new items, never touch
- * credits, refunds or moves. The attributes include the table's key, as IAM requires.
+ * What each role may do on the wallet table (wallet ADR 0001): GetItem and UpdateItem limited by
+ * leading key and attribute, so no request reads a whole item or returns old or new items, and none
+ * touches credits, refunds or moves. The attributes include the table's key, as IAM requires.
+ * The app's functions: read the guard, the link and `movedTo` (read only: only the wallet moves
+ * accounts); move the counters, the app's own SPEND# counter and the link fields; write PASS# rows.
+ * The sweeper, the retry Lambda and the rollup get only the counters they move, on WALLET#.
  */
-function walletStatements(table: dynamodb.ITable, appId: string): iam.PolicyStatement[] {
+function walletStatements(table: dynamodb.ITable, appId: string) {
   // ForAllValues is true for an empty set: the Null check makes the attribute list required.
-  const scoped = (leadingKeys: string[], attributes: string[]) => ({
-    'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': leadingKeys },
-    'ForAllValues:StringEquals': { 'dynamodb:Attributes': ['PK', 'SK', ...attributes] },
-    Null: { 'dynamodb:Attributes': 'false' },
-    StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES', 'dynamodb:ReturnValues': ['NONE', 'UPDATED_OLD', 'UPDATED_NEW'] },
+  const scoped = (action: string, leadingKeys: string[], attributes: string[]) => new iam.PolicyStatement({
+    actions: [`dynamodb:${action}`],
+    resources: [table.tableArn],
+    conditions: {
+      'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': leadingKeys },
+      'ForAllValues:StringEquals': { 'dynamodb:Attributes': ['PK', 'SK', ...attributes] },
+      Null: { 'dynamodb:Attributes': 'false' },
+      StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES', 'dynamodb:ReturnValues': ['NONE', 'UPDATED_OLD', 'UPDATED_NEW'] },
+    },
   });
-  return [
-    new iam.PolicyStatement({
-      actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
-      resources: [table.tableArn],
-      conditions: scoped(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', appId, 'links', 'email', 'lang', 'movedTo', 'account']),
-    }),
-    new iam.PolicyStatement({ actions: ['dynamodb:PutItem'], resources: [table.tableArn], conditions: scoped(['PASS#*'], ['account', 'expiresAt']) }),
-  ];
+  const linked = ['WALLET#*', 'LINK#*'];
+  const wallet = ['WALLET#*'];
+  return {
+    app: [
+      scoped('GetItem', linked, ['availableMicroUsd', 'account', 'email', 'lang', 'movedTo']),
+      scoped('UpdateItem', linked, ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', appId, 'links', 'email', 'lang', 'account']),
+      scoped('PutItem', ['PASS#*'], ['account', 'expiresAt']),
+    ],
+    // A swept hold is absorbed: it only gives the hold back.
+    sweeper: [scoped('UpdateItem', wallet, ['availableMicroUsd', 'heldMicroUsd'])],
+    retry: [scoped('UpdateItem', wallet, ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', appId])],
+    rollup: [scoped('GetItem', wallet, ['availableMicroUsd']), scoped('UpdateItem', wallet, ['availableMicroUsd', 'spentMicroUsd', appId])],
+  };
 }
 
 /**
@@ -665,8 +676,8 @@ export class Metering extends Construct {
   private readonly concurrency?: { max: number; reserved: number };
   /** The granted functions' log group names, which the rollup queries. */
   private readonly logGroups: string[] = [];
-  /** Hosted billing: the wallet table's statements, and the error terms its lines add. */
-  private readonly wallet?: iam.PolicyStatement[];
+  /** Hosted billing: each role's statements on the wallet table, and the error terms its lines add. */
+  private readonly wallet?: ReturnType<typeof walletStatements>;
   private readonly errorTerms: string[];
 
   constructor(scope: Construct, id: string, props: MeteringProps) {
@@ -715,7 +726,7 @@ export class Metering extends Construct {
     this.retry = new MeteringRetry(this, 'Retry', { table: this.table, alarmAction: props.alarmAction });
     // FairMeter records: a refused settle reads the EVENT, and a settle deletes the PENDING row.
     this.table.grant(this.retry.fn, 'dynamodb:GetItem', 'dynamodb:DeleteItem');
-    this.grantWallet(this.retry.fn);
+    this.grantWallet(this.retry.fn, 'retry');
     this.config = {
       appId: props.appId,
       env: props.env,
@@ -739,7 +750,7 @@ export class Metering extends Construct {
       logGroup: sweeperLogs,
     });
     this.table.grant(this.sweeper, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
-    this.grantWallet(this.sweeper);
+    this.grantWallet(this.sweeper, 'sweeper');
     new events.Rule(this, 'SweeperSchedule', {
       description: `Settle ${props.appId} reservations left open for 30 minutes`,
       schedule: events.Schedule.rate(cdk.Duration.minutes(10)),
@@ -788,7 +799,7 @@ export class Metering extends Construct {
       });
       // Prices, the cursor and the usage transaction. StartQuery is granted per log group in grant().
       this.table.grant(rollup, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem');
-      this.grantWallet(rollup);
+      this.grantWallet(rollup, 'rollup');
       rollup.addToRolePolicy(new iam.PolicyStatement({ actions: ['logs:GetQueryResults'], resources: ['*'] }));
       // On the quarter hours: rate() can start anywhere in a window, so a window could wait 45 minutes, the whole rollup lag, before its run starts.
       new events.Rule(this, 'RollupSchedule', {
@@ -824,7 +835,7 @@ export class Metering extends Construct {
     }
     this.table.grant(fn, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
     this.retry.queue.grantSendMessages(fn);
-    this.grantWallet(fn);
+    this.grantWallet(fn, 'app');
     fn.addEnvironment('FAIR_METER', cdk.Stack.of(this).toJsonString(this.config));
     this.watchErrors(fn);
     if (this.rollup) {
@@ -833,9 +844,9 @@ export class Metering extends Construct {
     }
   }
 
-  /** Hosted billing: the wallet table, scoped (walletStatements). Nothing under billing 'none'. */
-  private grantWallet(fn: lambda.Function) {
-    for (const statement of this.wallet ?? []) fn.addToRolePolicy(statement);
+  /** Hosted billing: the wallet table, scoped to the role (walletStatements). Nothing under billing 'none'. */
+  private grantWallet(fn: lambda.Function, role: keyof ReturnType<typeof walletStatements>) {
+    for (const statement of this.wallet?.[role] ?? []) fn.addToRolePolicy(statement);
   }
 
   /** Counts `fn`'s metering error lines into the ErrorsAlarm metric. */
