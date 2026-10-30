@@ -169,6 +169,8 @@ export type RecordOutcome = 'recorded' | 'duplicate' | 'trued_up' | 'conflict' |
 export type AttemptUsage = object | undefined | 'unknown' | 'not_billed' | 'not_sent';
 
 const positive = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
+/** Hosted billing's settings, or undefined under 'none': the one test of which billing is on. */
+export const hostedBilling = <B extends object>(billing: B | 'none' | undefined): B | undefined => (typeof billing === 'object' && billing !== null ? billing : undefined);
 export const isHttpsUrl = (v: unknown) => typeof v === 'string' && /^https:\/\/[^\s/]+/.test(v);
 
 function readConfig(config?: FairMeterConfig): FairMeterConfig {
@@ -178,11 +180,11 @@ function readConfig(config?: FairMeterConfig): FairMeterConfig {
   }
   const c = config;
   assertAppId(c.appId);
-  const billing = c.billing;
-  if (typeof billing === 'object' && billing !== null) {
+  const billing = hostedBilling(c.billing);
+  if (billing) {
     if (!(typeof billing.walletTable === 'string' && billing.walletTable)) throw new Error('FairMeter: billing.walletTable must be the wallet table name');
     if (!isHttpsUrl(billing.topUpUrl)) throw new Error("FairMeter: billing.topUpUrl must be the stage's https top-up URL");
-  } else if (billing !== undefined && billing !== 'none') throw new Error(`FairMeter: unknown billing ${JSON.stringify(c.billing)} (hosted is { walletTable })`);
+  } else if (c.billing !== undefined && c.billing !== 'none') throw new Error(`FairMeter: unknown billing ${JSON.stringify(c.billing)} (hosted is { walletTable, topUpUrl })`);
   if (!c.env || !c.tableName || !c.retryQueueUrl) throw new Error('FairMeter: env, tableName and retryQueueUrl are required');
   for (const [name, v] of Object.entries({ dailyCapMicroUsd: c.dailyCapMicroUsd, appDailyCapMicroUsd: c.appDailyCapMicroUsd })) {
     if (!positive(v)) throw new Error(`FairMeter: ${name} must be a positive integer (micro-USD)`);
@@ -476,11 +478,11 @@ export class FairMeter {
     const at = this.now();
     const dayKey = keys.userDay(person, this.cfg.appId, utcDay(at));
     const monthKey = keys.userMonth(person, this.cfg.appId, utcMonth(at));
-    const billing = this.cfg.billing;
-    const account = typeof billing === 'object' ? this.links.get(person)?.account : undefined;
+    const billing = hostedBilling(this.cfg.billing);
+    const account = billing && this.links.get(person)?.account;
     const [out, wallet] = await Promise.all([
       this.ddb.send(new BatchGetCommand({ RequestItems: { [this.cfg.tableName]: { Keys: [dayKey, monthKey], ConsistentRead: true } } })),
-      account && this.ddb.send(new GetCommand({ TableName: (billing as { walletTable: string }).walletTable, Key: walletKeys.balance(account), ProjectionExpression: 'availableMicroUsd', ConsistentRead: true })),
+      account && this.ddb.send(new GetCommand({ TableName: billing.walletTable, Key: walletKeys.balance(account), ProjectionExpression: 'availableMicroUsd', ConsistentRead: true })),
     ]);
     if (Object.keys(out.UnprocessedKeys ?? {}).length) throw new Error('FairMeter.usage: the read was not processed (throttled)');
     const rows = out.Responses?.[this.cfg.tableName] ?? [];
@@ -491,7 +493,7 @@ export class FairMeter {
     const spent = (row: Record<string, unknown>) => {
       const cost = Number(row.costMicroUsd ?? 0) - Number(row.absorbedMicroUsd ?? 0);
       const fee = Number(row.feeMicroUsd ?? 0);
-      return { spentMicroUsd: cost + fee, ...(typeof billing === 'object' ? { costMicroUsd: cost, feeMicroUsd: fee } : {}) };
+      return { spentMicroUsd: cost + fee, ...(billing ? { costMicroUsd: cost, feeMicroUsd: fee } : {}) };
     };
     const committed = Number(day.committedMicroUsd ?? 0);
     const cap = this.cfg.dailyCapMicroUsd;
@@ -521,7 +523,7 @@ export class FairMeter {
     try {
       const { person, sku, n = 1 } = req;
       // Hosted: the rollup charges the account on the line; a person not linked here has none (canWrite refused them).
-      const account = typeof this.cfg.billing === 'object' ? this.links.get(person)?.account ?? '' : undefined;
+      const account = hostedBilling(this.cfg.billing) && (this.links.get(person)?.account ?? '');
       if (typeof person !== 'string' || !person || !this.cfg.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > this.cfg.actions.perPersonPerMinute || account === '') {
         console.error('ACTION_UNKNOWN', { appId: this.cfg.appId, person, sku, n });
         return;
@@ -582,8 +584,8 @@ export class FairMeter {
 
   /** The floor as the daily cap counts it: hosted, with its fee (charged amounts). */
   private capFloor(at: Date): number {
-    const billing = this.cfg.billing;
-    return typeof billing === 'object' ? this.floor + feeOf(this.floor, feeAt(at, billing.fee).feeBps) : this.floor;
+    const billing = hostedBilling(this.cfg.billing);
+    return billing ? this.floor + feeOf(this.floor, feeAt(at, billing.fee).feeBps) : this.floor;
   }
 
   /** This instance's per-person action counts for the current UTC minute. */
@@ -699,8 +701,8 @@ export class FairMeter {
   }
 
   private walletTable(method: string): string {
-    const billing = this.cfg.billing;
-    if (typeof billing !== 'object') throw new Error(`FairMeter.${method}: needs hosted billing`);
+    const billing = hostedBilling(this.cfg.billing);
+    if (!billing) throw new Error(`FairMeter.${method}: needs hosted billing`);
     return billing.walletTable;
   }
 
@@ -709,8 +711,8 @@ export class FairMeter {
    * and the app's floor with its fee; or a ready refusal. Undefined under billing 'none'.
    */
   private async walletCharge(person: string, at: Date): Promise<{ table: string; topUpUrl: string; account: string; feeBps: number; floor: number } | Refusal | undefined> {
-    const billing = this.cfg.billing;
-    if (typeof billing !== 'object') return undefined;
+    const billing = hostedBilling(this.cfg.billing);
+    if (!billing) return undefined;
     const link = this.links.get(person);
     if (link && !link.account) {
       // A conflict support may have resolved since: LINK read again before refusing.
@@ -774,7 +776,7 @@ export function settlementRecord(cfg: Pick<FairMeterConfig, 'appId' | 'env' | 'b
   const h = call.hold;
   const at = new Date(h.at);
   if (!h.price || Number.isNaN(at.getTime()) || typeof h.reservedMicroUsd !== 'number') throw new Error('Unreadable hold');
-  const facts = { appId: cfg.appId, env: cfg.env, callId: call.callId, hold: h, walletTable: typeof cfg.billing === 'object' ? cfg.billing.walletTable : undefined };
+  const facts = { appId: cfg.appId, env: cfg.env, callId: call.callId, hold: h, walletTable: hostedBilling(cfg.billing)?.walletTable };
   if (usage === 'not_billed' || usage === 'not_sent') return holdRecord(facts, 'release');
   if (usage === 'unknown') return holdRecord(facts, 'aborted');
   const estimate = typeof usage === 'object' && usage !== null && 'estimate' in usage;

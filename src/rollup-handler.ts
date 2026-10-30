@@ -2,7 +2,7 @@ import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ACTION_LAG_MS } from './actions';
-import { MAX_MOVE_HOPS, type FairMeterConfig } from './fair-meter';
+import { hostedBilling, MAX_MOVE_HOPS, type FairMeterConfig } from './fair-meter';
 import { conditionFailed, keys, pkNotExists, setTableKeys, skOf, tableKeys } from './keys';
 import { absorbedOf, recordUsage, walletChargeOf, type UsageRecord } from './ledger';
 import { QUERY_ROW_LIMIT, runQuery } from './logs-insights';
@@ -39,7 +39,7 @@ export async function rollup(
   now: Date,
 ): Promise<{ windows: number; recorded: number; duplicate: number }> {
   const done = { windows: 0, recorded: 0, duplicate: 0 };
-  const billing = typeof cfg.billing === 'object' ? cfg.billing : undefined;
+  const billing = hostedBilling(cfg.billing);
   try {
     if (!logGroups.length) throw new Error('No log groups to query: grant a function first');
     const key = keys.rollupCursor(cfg.appId);

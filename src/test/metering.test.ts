@@ -202,7 +202,7 @@ test('MeteringRetry without an alarmAction: both DLQ alarms, no action', () => {
 });
 
 test.each([
-  ["billing 'hosted'", { billing: 'hosted' as const }],
+  ["billing 'hosted' (an untyped caller)", { billing: 'hosted' as never }],
   ['a bad appId', { appId: 'Stack Split' }],
   ['a cap with 7 decimals', { dailyCapUsd: '0.0000001' }],
   ['a daily cap above the app cap', { dailyCapUsd: '6' }],

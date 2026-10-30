@@ -1,6 +1,6 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { holdRecord, type FairMeterConfig, type HoldFacts } from './fair-meter';
+import { holdRecord, hostedBilling, type FairMeterConfig, type HoldFacts } from './fair-meter';
 import { setTableKeys, skOf, tableKeys } from './keys';
 import { absorbedOf, recordUsage } from './ledger';
 
@@ -33,7 +33,7 @@ export async function sweep(ddb: DynamoDBDocumentClient, cfg: Pick<FairMeterConf
       seen++;
       const callId = skOf(row).slice('CALL#'.length);
       try {
-        const walletTable = typeof cfg.billing === 'object' ? cfg.billing.walletTable : undefined;
+        const walletTable = hostedBilling(cfg.billing)?.walletTable;
         const record = holdRecord({ appId: cfg.appId, env: String(row.env ?? cfg.env), callId, hold: row as HoldFacts, walletTable }, 'swept');
         const outcome = await recordUsage(ddb, cfg.tableName, record);
         const facts = { appId: cfg.appId, callId, person: row.person, sku: row.sku, at: row.at, reservedMicroUsd: row.reservedMicroUsd, absorbedMicroUsd: absorbedOf(record), outcome };
