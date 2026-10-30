@@ -11,7 +11,7 @@ Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): ev
 TypeScript source, no build step: your bundler (esbuild via CDK's `NodejsFunction`) compiles it with your code.
 
 ```
-npm install github:unsubscribed-co/fair-meter#v0.3.1
+npm install github:unsubscribed-co/fair-meter#v0.4.0
 ```
 
 - `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/testing` has the test double (`FakeFairMeter`, see "Testing your metering code"); `fair-meter/<file>` reaches one file.

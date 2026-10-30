@@ -1,6 +1,6 @@
 {
   "name": "fair-meter",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Per-person, per-app spend metering for apps hosted at cost: prices, an append-only ledger in a DynamoDB table metering owns, caps, actions and a brake.",
   "license": "AGPL-3.0-only",
   "repository": "github:unsubscribed-co/fair-meter",
