@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { adjustmentId, applyAdjustment } from './adjust';
 import { keys, pkExists, pkNotExists, skOf, type TableKey } from './keys';
+import { walletKeys } from './wallet';
 
 /**
  * One metered call, fully priced. It is plain JSON so it can wait on the retry queue and be
@@ -59,14 +60,54 @@ export interface UsageRecord {
   estimated?: 'aborted' | 'no_usage' | 'swept';
   /** FairMeter 'not_billed': release the hold; no EVENT and no counters. */
   release?: boolean;
+  /**
+   * Hosted billing: the person's wallet moves in this transaction. `heldMicroUsd` is the hold plus its
+   * fee (absent for rolled-up actions); `chargedMicroUsd` is what the person pays, cost minus absorbed
+   * plus `feeMicroUsd`, never more than the hold (or, for actions, than available at the rollup's read).
+   */
+  wallet?: { table: string; account: string; heldMicroUsd?: number; feeMicroUsd: number; chargedMicroUsd: number };
 }
 
 /**
  * What the operator absorbs of a settle: the whole cost of an attempt that didn't serve the person
  * (swept, aborted). It still counts toward the cap; the person is charged cost minus absorbed.
+ * Hosted, also what the wallet couldn't be charged (above the hold, or a rollup's floor overrun):
+ * cost + fee - charged.
  */
-export const absorbedOf = (r: Pick<UsageRecord, 'estimated' | 'release' | 'costMicroUsd'>) =>
-  !r.release && (r.estimated === 'swept' || r.estimated === 'aborted') ? r.costMicroUsd : 0;
+export const absorbedOf = (r: Pick<UsageRecord, 'estimated' | 'release' | 'costMicroUsd' | 'wallet'>) =>
+  r.wallet ? (r.release ? 0 : r.costMicroUsd + r.wallet.feeMicroUsd - r.wallet.chargedMicroUsd)
+    : !r.release && (r.estimated === 'swept' || r.estimated === 'aborted') ? r.costMicroUsd : 0;
+
+/**
+ * Hosted: the person's wallet in the usage transaction. A settle or release gives the hold back and
+ * spends the charge; rolled-up actions (no hold) spend it only while available covers it. The
+ * app's SPEND counter for the month grows by the charge. Nothing for a charge of 0 without a hold.
+ */
+function walletItems(r: UsageRecord, month: string) {
+  const w = r.wallet;
+  if (!w) return [];
+  const charged = r.release ? 0 : w.chargedMicroUsd;
+  const held = w.heldMicroUsd;
+  if (held === undefined && !charged) return [];
+  const balance = {
+    Update: {
+      TableName: w.table,
+      Key: walletKeys.balance(w.account),
+      ...(held === undefined
+        ? {
+            UpdateExpression: 'ADD availableMicroUsd :out, spentMicroUsd :charged',
+            ConditionExpression: 'availableMicroUsd >= :charged',
+            ExpressionAttributeValues: { ':out': -charged, ':charged': charged },
+          }
+        : {
+            UpdateExpression: `ADD availableMicroUsd :back, heldMicroUsd :unheld${charged ? ', spentMicroUsd :charged' : ''}`,
+            ExpressionAttributeValues: { ':back': held - charged, ':unheld': -held, ...(charged ? { ':charged': charged } : {}) },
+          }),
+    },
+  };
+  const spend = { Update: { TableName: w.table, Key: walletKeys.spend(w.account, month), UpdateExpression: 'ADD #app :charged', ExpressionAttributeNames: { '#app': r.appId }, ExpressionAttributeValues: { ':charged': charged } } };
+  return charged ? [balance, spend] : [balance];
+}
 
 /** DynamoDB idempotency token (max 36 chars) derived from app and request id. */
 export const clientRequestToken = (appId: string, requestId: string) =>
@@ -93,7 +134,7 @@ export function recordProvider(r: Pick<UsageRecord, 'details'>): string | undefi
  * Counters (all per app): user month and day, household month (allowance), app day (breaker),
  * plus the all-apps day (ceiling), the provider day (reconciliation), the provider month (free
  * tiers, e.g. Google's free premium voice characters) and, for legacy prepaid households only, the
- * credit balance. At most 9 items, far below the 100-item transaction limit. The household month
+ * credit balance; hosted, the wallet's BALANCE and SPEND. At most 11 items, far below the 100-item transaction limit. The household month
  * also takes the record's one-way marks (householdMonthMarks), in the same update.
  *
  * The provider day sums what we expect the provider to charge (baseCostMicroUsd, before markup)
@@ -113,6 +154,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
       TransactItems: [
         ...pending,
         { Update: { TableName: table, Key: keys.userDay(r.sub, r.appId, day), UpdateExpression: 'ADD committedMicroUsd :held', ExpressionAttributeValues: { ':held': -held } } },
+        ...walletItems(r, month),
       ],
     });
   }
@@ -184,6 +226,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
             ...(r.usageHash !== undefined ? { usageHash: r.usageHash } : {}),
             ...(r.estimated !== undefined ? { estimated: r.estimated } : {}),
             ...(absorbed ? { absorbedMicroUsd: absorbed } : {}),
+            ...(r.wallet ? { account: r.wallet.account, feeMicroUsd: r.wallet.feeMicroUsd } : {}),
           },
           ConditionExpression: pkNotExists(),
         },
@@ -251,6 +294,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
           ]
         : []),
       ...pending,
+      ...walletItems(r, month),
     ],
   });
 }

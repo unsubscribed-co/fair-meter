@@ -73,7 +73,7 @@ export function loadPriceFiles(dir = PRICES_DIR): PriceFile[] {
 
 /**
  * The fee's one home: prices/fee.json, versioned like a price, in basis points of cost (10000 = 100%).
- * Nothing at runtime applies it yet: billing 'none' means no fee, and 'hosted' is refused.
+ * Billing 'none' charges no fee; hosted billing adds it to every charge (Metering puts the file in the config at synth).
  */
 export interface FeeFile {
   /** Oldest first. */
@@ -98,8 +98,10 @@ export function parseFeeFile(text: string): FeeFile {
   return f;
 }
 
+export const loadFeeFile = (): FeeFile => parseFeeFile(readFileSync(path.join(PRICES_DIR, FEE_FILE), 'utf8'));
+
 /** The fee version valid at `at`. */
-export function feeAt(at: Date, fee = parseFeeFile(readFileSync(path.join(PRICES_DIR, FEE_FILE), 'utf8'))): FeeFile['versions'][number] {
+export function feeAt(at: Date, fee = loadFeeFile()): FeeFile['versions'][number] {
   const version = versionStartedBy(fee.versions, at);
   if (!version) throw new Error(`prices/${FEE_FILE}: no fee version at ${pricingTime(at)}`);
   return version;

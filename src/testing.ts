@@ -1,11 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { pastFloor } from './actions';
 import { dayTier, type TierThresholds } from './budget';
-import { settlementRecord, type Actions, type AttemptUsage, type CallRequest, type FairMeterApi, type Hold, type PersonUsage, type RecordOutcome, type Refusal, type RefusalCode, type Reservation } from './fair-meter';
+import { settlementRecord, type Actions, type AttemptUsage, type CallRequest, type FairMeterApi, type Hold, type LinkOutcome, type PersonUsage, type RecordOutcome, type Refusal, type RefusalCode, type Reservation } from './fair-meter';
 import { nextUtcDay, nextUtcMonth, secondsToNextUtcMinute, utcDay, utcMinute, utcMonth } from './keys';
 import { absorbedOf } from './ledger';
-import { loadPriceFiles, type PriceFile } from './prices';
+import { feeAt, loadPriceFiles, type PriceFile } from './prices';
 import { reserveCost, versionStartedBy } from './pricing';
+import { feeOf, TOP_UP_URL } from './wallet';
 
 /*
  * fair-meter/testing: FairMeter in memory, for an app's own tests (no DynamoDB, no SDK mocks).
@@ -24,6 +25,8 @@ export interface FakeFairMeterOptions {
   /** Default: the price files fair-meter ships in prices/. */
   prices?: PriceFile[];
   now?: () => Date;
+  /** Hosted billing: wallets in memory (`fund`), charged cost plus the fee of prices/fee.json; people `link` first. */
+  hosted?: boolean;
 }
 
 type Row = { committed: number; cost: number; absorbed: number };
@@ -42,6 +45,10 @@ export class FakeFairMeter implements FairMeterApi {
   private readonly settled = new Map<string, string>();
   private actionCounts = { minute: '', perPerson: new Map<string, number>() };
   private forced?: RefusalCode;
+  /** Hosted: the LINK rows (person to account), each person's last link (none: a conflict), and each account's available. */
+  private readonly linkRows = new Map<string, string>();
+  private readonly links = new Map<string, string | undefined>();
+  private readonly available = new Map<string, number>();
 
   constructor(private readonly options: FakeFairMeterOptions = {}) {
     this.cap = options.dailyCapMicroUsd ?? 500_000;
@@ -56,13 +63,48 @@ export class FakeFairMeter implements FairMeterApi {
     this.forced = code;
   }
 
-  /** What the rollup does: charge rolled-up actions to the person's day (committed too) and month. */
+  /** Hosted: what the wallet does on a top-up, reduced to the account's available. */
+  fund(account: string, availableMicroUsd: number): void {
+    this.available.set(account, availableMicroUsd);
+  }
+
+  /**
+   * What the rollup does: charge rolled-up actions to the person's day (committed too) and month.
+   * Hosted, cost plus fee leaves the linked account's available, up to what is there (the rest absorbed, FLOOR_OVERRUN).
+   */
   rollUp(person: string, costMicroUsd: number): void {
     const at = this.now();
-    const day = this.row(person, utcDay(at));
-    day.committed += costMicroUsd;
-    day.cost += costMicroUsd;
-    this.row(person, utcMonth(at)).cost += costMicroUsd;
+    let absorbed = 0;
+    const account = this.links.get(person);
+    if (this.options.hosted && account) {
+      const due = costMicroUsd + feeOf(costMicroUsd, feeAt(at).feeBps);
+      const charged = Math.min(due, this.available.get(account) ?? 0);
+      this.available.set(account, (this.available.get(account) ?? 0) - charged);
+      absorbed = due - charged;
+      if (absorbed) console.error('FLOOR_OVERRUN', { person, account, chargedMicroUsd: charged, absorbedMicroUsd: absorbed });
+    }
+    for (const row of [this.row(person, utcDay(at)), this.row(person, utcMonth(at))]) {
+      row.cost += costMicroUsd;
+      row.absorbed += absorbed;
+    }
+    this.row(person, utcDay(at)).committed += costMicroUsd;
+  }
+
+  async link(person: string, sub: string, labels: { email: string; lang: string }): Promise<LinkOutcome> {
+    this.calls.push({ method: 'link', args: [person, sub, labels] });
+    if (!this.options.hosted) throw new Error("FakeFairMeter.link: needs hosted billing");
+    const linked = this.linkRows.get(person) ?? sub;
+    this.linkRows.set(person, linked);
+    if (linked !== sub) console.error('LINK_CONFLICT', { person });
+    this.links.set(person, linked === sub ? sub : undefined);
+    return linked === sub ? 'linked' : 'conflict';
+  }
+
+  async walletPass(person: string): Promise<string> {
+    this.calls.push({ method: 'walletPass', args: [person] });
+    if (!this.options.hosted) throw new Error('FakeFairMeter.walletPass: needs hosted billing');
+    if (!this.links.get(person)) throw new Error(`FakeFairMeter.walletPass: ${this.links.has(person) ? 'link_conflict' : 'account_not_linked'}`);
+    return randomBytes(32).toString('base64url');
   }
 
   async authorize(req: CallRequest): Promise<Reservation | Refusal> {
@@ -71,6 +113,8 @@ export class FakeFairMeter implements FairMeterApi {
     const day = this.row(req.person, utcDay(at));
     const forced = this.takeForced(at, this.tier(day.committed));
     if (forced) return forced;
+    const unlinked = this.unlinked(req.person, at);
+    if (unlinked) return unlinked;
     const file = this.prices.find((f) => f.sku === req.sku);
     const version = file && versionStartedBy(file.versions, at);
     if (!file || !version) return refusal('pricing_not_configured', at);
@@ -79,10 +123,19 @@ export class FakeFairMeter implements FairMeterApi {
     if (reserved === undefined) return refusal('metering_unavailable', at);
     // AI holds stop at cap - floor, as in FairMeter.
     if (pastFloor(day.committed + reserved, this.cap, this.floor)) return refusal('daily_limit_reached', at, this.tier(day.committed));
+    const account = this.links.get(req.person);
+    const feeBps = feeAt(at).feeBps;
+    if (account) {
+      // The hold plus its fee must leave the floor (with its fee) in available, as in FairMeter.
+      const held = reserved + feeOf(reserved, feeBps);
+      const left = this.available.get(account);
+      if (left === undefined || left < held + this.walletFloor(at)) return refusal('balance_too_low', at, this.tier(day.committed));
+      this.available.set(account, left - held);
+    }
     const callId = randomUUID();
     const hold: Hold = {
       person: req.person, at: at.toISOString(), sku: req.sku, provider: file.provider, pricingVersion: `${req.sku}@${version.validFrom}`,
-      price, max: req.max, reservedMicroUsd: reserved, paidBy: req.paidBy ?? 'paid',
+      price, max: req.max, reservedMicroUsd: reserved, paidBy: req.paidBy ?? 'paid', ...(account ? { account, feeBps } : {}),
     };
     day.committed += reserved;
     this.open.add(callId);
@@ -93,7 +146,7 @@ export class FakeFairMeter implements FairMeterApi {
     this.calls.push({ method: 'record', args: [call, usage] });
     let r;
     try {
-      r = settlementRecord({ appId: 'fake', env: 'test' }, call, usage);
+      r = settlementRecord({ appId: 'fake', env: 'test', billing: this.options.hosted ? { walletTable: 'fake' } : 'none' }, call, usage);
     } catch (err) {
       console.error('USAGE_RECORD_FAILED', { callId: call?.callId, call, usage, err });
       return 'failed';
@@ -107,6 +160,9 @@ export class FakeFairMeter implements FairMeterApi {
     }
     this.open.delete(call.callId);
     this.settled.set(call.callId, r.usageHash!);
+    const w = r.wallet;
+    // The hold back, the charge spent, on the hold's own account.
+    if (w) this.available.set(w.account, (this.available.get(w.account) ?? 0) + w.heldMicroUsd! - (r.release ? 0 : w.chargedMicroUsd));
     const day = this.row(r.sub, r.requestTime.slice(0, 10));
     if (r.release) {
       day.committed -= r.reservedMicroUsd!;
@@ -136,13 +192,15 @@ export class FakeFairMeter implements FairMeterApi {
       month: { spentMicroUsd: month.cost - month.absorbed, resetsAt: nextUtcMonth(at) },
       tier: this.tier(day.committed),
       readOnly: this.options.actions !== undefined && pastFloor(day.committed, this.cap, this.floor),
+      ...(this.links.get(person) ? { wallet: { availableMicroUsd: this.available.get(this.links.get(person)!) ?? 0 } } : {}),
     };
   }
 
   action(req: { person: string; sku: string; n?: number }): void {
     this.calls.push({ method: 'action', args: [req] });
     const { person, sku, n = 1 } = req ?? {};
-    if (typeof person !== 'string' || !person || !this.options.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > this.options.actions.perPersonPerMinute) {
+    if (typeof person !== 'string' || !person || !this.options.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > this.options.actions.perPersonPerMinute
+      || (this.options.hosted && !this.links.get(person))) {
       console.error('ACTION_UNKNOWN', { person, sku, n });
       return;
     }
@@ -160,7 +218,23 @@ export class FakeFairMeter implements FairMeterApi {
     const a = this.options.actions;
     if (!a || typeof person !== 'string' || !person || !Number.isInteger(n) || n < 1 || n > a.perPersonPerMinute) return { ...refusal('metering_unavailable', at), status: 500 };
     if ((this.actionsThisMinute().get(person) ?? 0) + n > a.perPersonPerMinute) return refusal('too_many_requests', at);
-    return !pastFloor(committed, this.cap, this.floor) ? { ok: true } : refusal('daily_limit_reached', at, this.tier(committed));
+    const unlinked = this.unlinked(person, at);
+    if (unlinked) return unlinked;
+    if (pastFloor(committed, this.cap, this.floor)) return refusal('daily_limit_reached', at, this.tier(committed));
+    const account = this.links.get(person);
+    if (account && !((this.available.get(account) ?? -1) >= this.walletFloor(at))) return refusal('balance_too_low', at, this.tier(committed));
+    return { ok: true };
+  }
+
+  /** Hosted: a person with no link here (account_not_linked) or a conflicting one (link_conflict). */
+  private unlinked(person: string, at: Date): Refusal | undefined {
+    if (!this.options.hosted || this.links.get(person)) return undefined;
+    return refusal(this.links.has(person) ? 'link_conflict' : 'account_not_linked', at);
+  }
+
+  /** Hosted: the floor plus its fee, what AI holds must leave in available. */
+  private walletFloor(at: Date): number {
+    return this.floor + feeOf(this.floor, feeAt(at).feeBps);
   }
 
   private takeForced(at: Date, tier: Refusal['tier']): Refusal | undefined {
@@ -190,8 +264,10 @@ export class FakeFairMeter implements FairMeterApi {
 /** The refusal FairMeter returns for this code; the tier only where FairMeter knows it. */
 function refusal(error: RefusalCode, at: Date, tier?: Refusal['tier']): Refusal {
   const retryAfterSeconds = secondsToNextUtcMinute(at);
-  const known = tier && error !== 'pricing_not_configured' && error !== 'metering_unavailable' ? { tier } : {};
+  const known = tier && !['pricing_not_configured', 'metering_unavailable', 'account_not_linked', 'link_conflict'].includes(error) ? { tier } : {};
   if (error === 'too_many_requests') return { ok: false, status: 429, body: { error, retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) }, ...known };
+  if (error === 'balance_too_low') return { ok: false, status: 402, body: { error, topUpUrl: TOP_UP_URL }, headers: {}, ...known };
+  if (error === 'account_not_linked' || error === 'link_conflict') return { ok: false, status: 403, body: { error }, headers: {} };
   const resetsAt = error === 'daily_limit_reached' || error === 'service_paused' ? { resetsAt: nextUtcDay(at) } : {};
   return { ok: false, status: error === 'daily_limit_reached' ? 429 : 503, body: { error, ...resetsAt }, headers: {}, ...known };
 }

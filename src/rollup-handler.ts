@@ -6,7 +6,9 @@ import type { FairMeterConfig } from './fair-meter';
 import { conditionFailed, keys, pkNotExists, setTableKeys, skOf, tableKeys } from './keys';
 import { recordUsage, type UsageRecord } from './ledger';
 import { QUERY_ROW_LIMIT, runQuery } from './logs-insights';
+import { feeAt } from './prices';
 import { priceCall, versionStartedBy, versionCovers } from './pricing';
+import { feeOf, walletKeys } from './wallet';
 
 /*
  * The action rollup: every 15 minutes, one Logs Insights query per fixed 15-minute UTC window that
@@ -20,23 +22,24 @@ export const DUE_MS = 2 * WINDOW_MS;
 /** Catch-up per run, so a run stays well inside its timeout. */
 export const MAX_WINDOWS = 8;
 
-/** The Logs Insights query for one window: the lines `action()` writes, summed per person, SKU and env. */
-export function actionQuery(appId: string, windowStart: number): string {
+/** The Logs Insights query for one window: the lines `action()` writes, summed per person, SKU and env (hosted: and account). */
+export function actionQuery(appId: string, windowStart: number, hosted = false): string {
   return [
     `filter fairMeter = "action" and appId = "${appId}" and @timestamp >= ${windowStart} and @timestamp < ${windowStart + WINDOW_MS}`,
     // Not `as n`: Logs Insights returns no value for an alias that names a field of the lines (seen in StackSplit's dev).
-    'stats sum(n) as actions by person, sku, env',
+    `stats sum(n) as actions by person, sku, env${hosted ? ', account' : ''}`,
   ].join(' | ');
 }
 
 export async function rollup(
   ddb: DynamoDBDocumentClient,
   cwl: CloudWatchLogsClient,
-  cfg: Pick<FairMeterConfig, 'appId' | 'env' | 'tableName'>,
+  cfg: Pick<FairMeterConfig, 'appId' | 'env' | 'tableName' | 'billing'>,
   logGroups: string[],
   now: Date,
 ): Promise<{ windows: number; recorded: number; duplicate: number }> {
   const done = { windows: 0, recorded: 0, duplicate: 0 };
+  const billing = typeof cfg.billing === 'object' ? cfg.billing : undefined;
   try {
     if (!logGroups.length) throw new Error('No log groups to query: grant a function first');
     const key = keys.rollupCursor(cfg.appId);
@@ -59,7 +62,7 @@ export async function rollup(
         // Whole seconds, both ends inclusive: the query's own @timestamp filter keeps windows apart.
         startTime: start / 1000,
         endTime: (start + WINDOW_MS) / 1000,
-        queryString: actionQuery(cfg.appId, start),
+        queryString: actionQuery(cfg.appId, start, billing !== undefined),
       });
       if (rows.length >= QUERY_ROW_LIMIT) {
         console.error('ROLLUP_TRUNCATED', { appId: cfg.appId, windowStart, rows: rows.length });
@@ -67,7 +70,7 @@ export async function rollup(
       }
       const records: UsageRecord[] = [];
       for (const row of rows) {
-        const { person, sku, env, actions } = Object.fromEntries(row.map((f) => [f.field, f.value]));
+        const { person, sku, env, actions, account } = Object.fromEntries(row.map((f) => [f.field, f.value]));
         const count = Number(actions);
         if (!person || !sku || !env || !(Number.isSafeInteger(count) && count > 0)) throw new Error(`Rollup: unreadable row in the ${windowStart} window: ${JSON.stringify(row)}`);
         const price = await priceAt(ddb, cfg.tableName, prices, sku, new Date(start));
@@ -91,11 +94,15 @@ export async function rollup(
           markupBps: 0,
           deductCredit: false,
           env,
+          // Hosted: the account on the lines pays (lines from before the switch carry none and charge no wallet).
+          ...(billing && account
+            ? { wallet: { table: billing.walletTable, account, feeMicroUsd: feeOf(priced.costMicroUsd, feeAt(new Date(start), billing.fee).feeBps), chargedMicroUsd: 0 } }
+            : {}),
         });
       }
       for (const r of records) {
         // Without a hold, recordUsage resolves only these two (anything else throws).
-        done[(await recordUsage(ddb, cfg.tableName, r)) as 'recorded' | 'duplicate']++;
+        done[(r.wallet ? await chargeActions(ddb, cfg.tableName, r) : await recordUsage(ddb, cfg.tableName, r)) as 'recorded' | 'duplicate']++;
       }
       await ddb.send(new UpdateCommand({
         TableName: cfg.tableName,
@@ -111,6 +118,31 @@ export async function rollup(
   } catch (err) {
     console.error('ROLLUP_FAILED', { appId: cfg.appId, ...done, err });
     throw err;
+  }
+}
+
+/**
+ * Rolled-up actions under hosted billing: charged = min(cost + fee, available), written in the EVENT's
+ * transaction on the condition that available still covers it; a refused condition (another app
+ * charged in between) or a conflict reads again. A shortfall is absorbed on the EVENT, FLOOR_OVERRUN.
+ */
+async function chargeActions(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord) {
+  const w = r.wallet!;
+  const due = r.costMicroUsd + w.feeMicroUsd;
+  for (let attempt = 0; ; attempt++) {
+    const { Item } = await ddb.send(new GetCommand({ TableName: w.table, Key: walletKeys.balance(w.account), ProjectionExpression: 'availableMicroUsd', ConsistentRead: true }));
+    const charged = Math.min(due, Math.max(0, Number(Item?.availableMicroUsd ?? 0)));
+    try {
+      const outcome = await recordUsage(ddb, table, { ...r, wallet: { ...w, chargedMicroUsd: charged } });
+      if (outcome === 'recorded' && charged < due) {
+        console.error('FLOOR_OVERRUN', { appId: r.appId, person: r.sub, account: w.account, requestId: r.requestId, chargedMicroUsd: charged, absorbedMicroUsd: due - charged });
+      }
+      return outcome;
+    } catch (err) {
+      const reasons = (err as { CancellationReasons?: { Code?: string }[] }).CancellationReasons ?? [];
+      if (attempt < 2 && reasons.some((c) => c.Code === 'ConditionalCheckFailed' || c.Code === 'TransactionConflict')) continue;
+      throw err;
+    }
   }
 }
 

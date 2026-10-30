@@ -1,16 +1,18 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
-import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { pastFloor } from './actions';
 import { assertTierThresholds, dayTier, type BudgetTier, type TierThresholds } from './budget';
 import type { Meters } from './cost';
 import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, secondsToNextUtcMinute, setTableKeys, skOf, tableKeys, utcDay, utcMinute, utcMonth, type TableKeys } from './keys';
-import { recordUsage, type UsageRecord } from './ledger';
+import { absorbedOf, recordUsage, type UsageRecord } from './ledger';
 import { takeCapacity } from './measure';
 import { Meter } from './meter';
+import { feeAt, type FeeFile } from './prices';
 import { priceCall, priceShape, reserveCost, versionStartedBy, versionCovers, type CallUsage, type PriceShape } from './pricing';
 import { canonicalMeters, isProvider, metersFromUsage, type Provider } from './usage';
+import { feeOf, PASS_TTL_SECONDS, TOP_UP_URL, walletKeys } from './wallet';
 
 /*
  * The money path for apps: `authorize` reserves an attempt's highest possible cost against the
@@ -40,8 +42,11 @@ export interface FairMeterConfig {
   maxCallsPerMinute?: number;
   /** Budget tier thresholds; default 75/90. */
   tiers?: TierThresholds;
-  /** 'none' (default): nobody is charged. 'hosted' needs the wallet, which doesn't exist yet: refused. */
-  billing?: 'none' | 'hosted';
+  /**
+   * 'none' (default): nobody is charged. Hosted: every charge, plus the fee, moves the person's wallet
+   * in the same transaction as the ledger. `fee` is prices/fee.json (Metering writes it at synth; read from the file when absent).
+   */
+  billing?: 'none' | { walletTable: string; fee?: FeeFile };
   /** The table's key names when they aren't PK/SK (StackSplit: pk/sk). */
   tableKeys?: Partial<TableKeys>;
   /** The app's action SKUs and the limits the floor is computed from (Metering's `actions`). Absent: no actions. */
@@ -88,6 +93,10 @@ export interface Hold {
   max: Max;
   reservedMicroUsd: number;
   paidBy: 'credit' | 'paid';
+  /** Hosted: the wallet account charged, found at authorize; settle, release and sweep use it, never a fresh lookup. */
+  account?: string;
+  /** Hosted: the fee version's basis points at authorize. */
+  feeBps?: number;
 }
 
 export interface Reservation {
@@ -99,12 +108,14 @@ export interface Reservation {
   readonly hold: Hold;
 }
 
-export type RefusalCode = 'daily_limit_reached' | 'too_many_requests' | 'service_paused' | 'pricing_not_configured' | 'metering_unavailable';
+export type RefusalCode = 'daily_limit_reached' | 'too_many_requests' | 'service_paused' | 'pricing_not_configured' | 'metering_unavailable'
+  | 'balance_too_low' | 'account_not_linked' | 'link_conflict';
 
 export interface Refusal {
   ok: false;
-  status: 429 | 500 | 503;
-  body: { error: RefusalCode; resetsAt?: string; retryAfterSeconds?: number };
+  status: 402 | 403 | 429 | 500 | 503;
+  /** topUpUrl: on balance_too_low, where the person tops up. */
+  body: { error: RefusalCode; resetsAt?: string; retryAfterSeconds?: number; topUpUrl?: string };
   /** Retry-After on too_many_requests; otherwise {}. */
   headers: Record<string, string>;
   /** Known once the counters were read. */
@@ -118,6 +129,8 @@ export interface PersonUsage {
   tier: BudgetTier;
   /** Actions configured and committed above cap - floor: canWrite refuses until the room comes back. */
   readOnly: boolean;
+  /** Hosted, for a linked person: what their wallet may still spend (0 without a BALANCE row). */
+  wallet?: { availableMicroUsd: number };
 }
 
 /**
@@ -135,7 +148,10 @@ export function resetsAtLocal(resetsAt: string, opts: { locale: string; timeZone
 }
 
 /** The public methods of FairMeter: inject this type to swap in `FakeFairMeter` (fair-meter/testing) in tests. */
-export type FairMeterApi = Pick<FairMeter, 'authorize' | 'record' | 'usage' | 'canWrite' | 'action'>;
+export type FairMeterApi = Pick<FairMeter, 'authorize' | 'record' | 'usage' | 'canWrite' | 'action' | 'link' | 'walletPass'>;
+
+/** `link`'s answer: the person now pays from that account, or their link points to another one (nothing written). */
+export type LinkOutcome = 'linked' | 'conflict';
 
 export type RecordOutcome = 'recorded' | 'duplicate' | 'trued_up' | 'conflict' | 'deferred' | 'failed';
 
@@ -151,8 +167,10 @@ function readConfig(config?: FairMeterConfig): FairMeterConfig {
   }
   const c = config;
   assertAppId(c.appId);
-  if (c.billing === 'hosted') throw new Error("FairMeter: billing 'hosted' needs the wallet, which v0.2.0 doesn't have");
-  if (c.billing !== undefined && c.billing !== 'none') throw new Error(`FairMeter: unknown billing ${c.billing}`);
+  const billing = c.billing;
+  if (typeof billing === 'object' && billing !== null) {
+    if (!(typeof billing.walletTable === 'string' && billing.walletTable)) throw new Error('FairMeter: billing.walletTable must be the wallet table name');
+  } else if (billing !== undefined && billing !== 'none') throw new Error(`FairMeter: unknown billing ${JSON.stringify(c.billing)} (hosted is { walletTable })`);
   if (!c.env || !c.tableName || !c.retryQueueUrl) throw new Error('FairMeter: env, tableName and retryQueueUrl are required');
   for (const [name, v] of Object.entries({ dailyCapMicroUsd: c.dailyCapMicroUsd, appDailyCapMicroUsd: c.appDailyCapMicroUsd })) {
     if (!positive(v)) throw new Error(`FairMeter: ${name} must be a positive integer (micro-USD)`);
@@ -182,6 +200,8 @@ export class FairMeter {
   private readonly prices = new Map<string, { readAt: number; versions: Record<string, any>[] }>();
   /** Actions per person in the current UTC minute, this instance only; a new minute starts an empty map. */
   private actionCounts = { minute: '', perPerson: new Map<string, number>() };
+  /** Hosted: each person's last `link` on this instance: the account that pays, or none (a link conflict). */
+  private readonly links = new Map<string, { sub: string; account?: string }>();
 
   /** Reads FAIR_METER when `config` is omitted. Throws on a bad config (startup, never after a paid call). */
   constructor(config?: FairMeterConfig, clients: { ddb?: DynamoDBDocumentClient; sqs?: SQSClient; now?: () => Date } = {}) {
@@ -243,6 +263,8 @@ export class FairMeter {
     const at = this.now();
     const day = utcDay(at);
     const log = { appId, person: req.person, sku: req.sku };
+    const charge = this.walletCharge(req.person, at);
+    if (charge && 'ok' in charge) return charge;
     let read;
     const reading = Date.now();
     try {
@@ -308,8 +330,11 @@ export class FairMeter {
       max: req.max,
       reservedMicroUsd: reserved,
       paidBy: req.paidBy ?? 'paid',
+      ...(charge ? { account: charge.account, feeBps: charge.feeBps } : {}),
     };
     const { price: _, ...pending } = hold;
+    // Hosted: the hold plus its fee leaves available, which must still cover the app's floor (with its fee).
+    const walletHold = charge && reserved + feeOf(reserved, charge.feeBps);
     const reserve = new TransactWriteCommand({
       ClientRequestToken: createHash('sha256').update(`${appId}#hold#${callId}`).digest('hex').slice(0, 32),
       TransactItems: [
@@ -324,6 +349,15 @@ export class FairMeter {
             ExpressionAttributeValues: { ':reserved': reserved, ':room': limit - reserved },
           },
         },
+        ...(charge ? [{
+          Update: {
+            TableName: charge.table,
+            Key: walletKeys.balance(charge.account),
+            UpdateExpression: 'ADD availableMicroUsd :out, heldMicroUsd :held',
+            ConditionExpression: 'availableMicroUsd >= :needed',
+            ExpressionAttributeValues: { ':out': -walletHold!, ':held': walletHold!, ':needed': walletHold! + charge.floor },
+          },
+        }] : []),
       ],
     });
     timing.reserving = Date.now();
@@ -339,6 +373,7 @@ export class FairMeter {
           return refuse(500, 'metering_unavailable');
         }
         if (reasons[1]?.Code === 'ConditionalCheckFailed') return this.limitReached(log, at, tier);
+        if (reasons[2]?.Code === 'ConditionalCheckFailed') return this.balanceTooLow(log, charge!, tier);
         // A cancellation is definite: nothing was written. Anything else (a timeout, a 5xx, a
         // transaction still in progress) may have committed or may still commit.
         const ambiguous = !reasons.length;
@@ -420,13 +455,19 @@ export class FairMeter {
 
   /**
    * What the person has spent today and this month, what is held for calls in flight, and the room
-   * left under the daily cap: one strongly consistent read. It moves no money, so a read error rejects.
+   * left under the daily cap: one strongly consistent read (hosted, a second for a linked person's
+   * wallet). It moves no money, so a read error rejects.
    */
   async usage(person: string): Promise<PersonUsage> {
     const at = this.now();
     const dayKey = keys.userDay(person, this.cfg.appId, utcDay(at));
     const monthKey = keys.userMonth(person, this.cfg.appId, utcMonth(at));
-    const out = await this.ddb.send(new BatchGetCommand({ RequestItems: { [this.cfg.tableName]: { Keys: [dayKey, monthKey], ConsistentRead: true } } }));
+    const billing = this.cfg.billing;
+    const account = typeof billing === 'object' ? this.links.get(person)?.account : undefined;
+    const [out, wallet] = await Promise.all([
+      this.ddb.send(new BatchGetCommand({ RequestItems: { [this.cfg.tableName]: { Keys: [dayKey, monthKey], ConsistentRead: true } } })),
+      account && this.ddb.send(new GetCommand({ TableName: (billing as { walletTable: string }).walletTable, Key: walletKeys.balance(account), ProjectionExpression: 'availableMicroUsd', ConsistentRead: true })),
+    ]);
     if (Object.keys(out.UnprocessedKeys ?? {}).length) throw new Error('FairMeter.usage: the read was not processed (throttled)');
     const rows = out.Responses?.[this.cfg.tableName] ?? [];
     const sk = tableKeys().sk;
@@ -447,6 +488,7 @@ export class FairMeter {
       month: { spentMicroUsd: spent(month), resetsAt: nextUtcMonth(at) },
       tier: dayTier(committed, cap, this.cfg.tiers),
       readOnly: this.cfg.actions !== undefined && pastFloor(committed, cap, this.floor),
+      ...(wallet ? { wallet: { availableMicroUsd: Number(wallet.Item?.availableMicroUsd ?? 0) } } : {}),
     };
   }
 
@@ -460,11 +502,13 @@ export class FairMeter {
   action(req: { person: string; sku: string; n?: number }): void {
     try {
       const { person, sku, n = 1 } = req;
-      if (typeof person !== 'string' || !person || !this.cfg.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > this.cfg.actions.perPersonPerMinute) {
+      // Hosted: the rollup charges the account on the line; a person not linked here has none (canWrite refused them).
+      const account = typeof this.cfg.billing === 'object' ? this.links.get(person)?.account ?? '' : undefined;
+      if (typeof person !== 'string' || !person || !this.cfg.actions?.skus.includes(sku) || !Number.isInteger(n) || n < 1 || n > this.cfg.actions.perPersonPerMinute || account === '') {
         console.error('ACTION_UNKNOWN', { appId: this.cfg.appId, person, sku, n });
         return;
       }
-      process.stdout.write(JSON.stringify({ fairMeter: 'action', appId: this.cfg.appId, env: this.cfg.env, person, sku, n, ...takeCapacity() }) + '\n');
+      process.stdout.write(JSON.stringify({ fairMeter: 'action', appId: this.cfg.appId, env: this.cfg.env, person, sku, n, ...(account ? { account } : {}), ...takeCapacity() }) + '\n');
       const counts = this.actionsThisMinute();
       counts.set(person, (counts.get(person) ?? 0) + n);
     } catch (err) {
@@ -476,7 +520,8 @@ export class FairMeter {
    * Before a write that reports `n` actions: `{ ok: true }`, or a ready refusal (the person is
    * read-only until their room comes back). Never throws. Per instance, at most perPersonPerMinute
    * actions per person per UTC minute, then one eventually consistent read of the person's day:
-   * committed above cap - floor (pushed there by the rollup) is daily_limit_reached.
+   * committed above cap - floor (pushed there by the rollup) is daily_limit_reached. Hosted, also
+   * one of the wallet: available below the floor (with its fee) is balance_too_low.
    */
   async canWrite(person: string, n = 1): Promise<{ ok: true } | Refusal> {
     const log = { appId: this.cfg.appId, person };
@@ -495,10 +540,17 @@ export class FairMeter {
         console.warn('RATE_LIMITED', { ...log, perPersonPerMinute: a!.perPersonPerMinute });
         return { ok: false, status: 429, body: { error: 'too_many_requests', retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) } };
       }
-      const { Item } = await this.ddb.send(new GetCommand({ TableName: this.cfg.tableName, Key: keys.userDay(person, this.cfg.appId, utcDay(at)) }));
+      const charge = this.walletCharge(person, at);
+      if (charge && 'ok' in charge) return charge;
+      const [{ Item }, wallet] = await Promise.all([
+        this.ddb.send(new GetCommand({ TableName: this.cfg.tableName, Key: keys.userDay(person, this.cfg.appId, utcDay(at)) })),
+        charge && this.ddb.send(new GetCommand({ TableName: charge.table, Key: walletKeys.balance(charge.account), ProjectionExpression: 'availableMicroUsd' })),
+      ]);
       const committed = Number(Item?.committedMicroUsd ?? 0);
-      if (!pastFloor(committed, this.cfg.dailyCapMicroUsd, this.floor)) return { ok: true };
-      return this.limitReached(log, at, dayTier(committed, this.cfg.dailyCapMicroUsd, this.cfg.tiers));
+      const tier = dayTier(committed, this.cfg.dailyCapMicroUsd, this.cfg.tiers);
+      if (pastFloor(committed, this.cfg.dailyCapMicroUsd, this.floor)) return this.limitReached(log, at, tier);
+      if (charge && !(Number(wallet!.Item?.availableMicroUsd) >= charge.floor)) return await this.balanceTooLow(log, charge, tier);
+      return { ok: true };
     } catch (err) {
       console.error('METER_UNAVAILABLE', { ...log, err });
       return refuse(503, 'metering_unavailable');
@@ -515,6 +567,99 @@ export class FairMeter {
     const minute = utcMinute(this.now());
     if (this.actionCounts.minute !== minute) this.actionCounts = { minute, perPerson: new Map() };
     return this.actionCounts.perPerson;
+  }
+
+  /**
+   * Hosted, at every sign-in: which account pays for `person`. A first link writes LINK and adds it to
+   * the account's BALANCE `links`, with the email and lang labels; the same account again is a no-op;
+   * another account is 'conflict', writes nothing, and this person's hosted calls are refused
+   * link_conflict until support relinks (wallet ADR 0003). Remembered per instance: hosted calls
+   * use the account of the person's last link here. Rejects on a read or write error.
+   */
+  async link(person: string, sub: string, labels: { email: string; lang: string }): Promise<LinkOutcome> {
+    const table = this.walletTable('link');
+    if (typeof person !== 'string' || !person || typeof sub !== 'string' || !sub) throw new Error('FairMeter.link: person and sub are required');
+    const known = this.links.get(person);
+    if (known?.sub === sub) return known.account ? 'linked' : 'conflict';
+    const key = walletKeys.link(this.cfg.appId, person);
+    for (let attempt = 0; ; attempt++) {
+      const { Item } = await this.ddb.send(new GetCommand({ TableName: table, Key: key, ProjectionExpression: 'account', ConsistentRead: true }));
+      if (Item) {
+        const same = Item.account === sub;
+        if (!same) console.error('LINK_CONFLICT', { appId: this.cfg.appId, person });
+        this.links.set(person, { sub, ...(same ? { account: sub } : {}) });
+        return same ? 'linked' : 'conflict';
+      }
+      try {
+        await this.ddb.send(new TransactWriteCommand({
+          TransactItems: [
+            { Update: { TableName: table, Key: key, UpdateExpression: 'SET account = :sub', ConditionExpression: 'attribute_not_exists(PK)', ExpressionAttributeValues: { ':sub': sub } } },
+            {
+              Update: {
+                TableName: table,
+                Key: walletKeys.balance(sub),
+                UpdateExpression: 'ADD links :link SET email = :email, lang = :lang',
+                ExpressionAttributeValues: { ':link': new Set([`${this.cfg.appId}#${person}`]), ':email': labels.email, ':lang': labels.lang },
+              },
+            },
+          ],
+        }));
+        this.links.set(person, { sub, account: sub });
+        return 'linked';
+      } catch (err) {
+        // Another instance linked this person first (or the BALANCE was busy): read again, then decide.
+        if (attempt < 2 && (err as { name?: string }).name === 'TransactionCanceledException') continue;
+        throw err;
+      }
+    }
+  }
+
+  /**
+   * Hosted: a single-use pass to the embedded wallet view for this person, valid 2 minutes
+   * (PASS#<random>, the account). Returns the random value for the view's URL fragment. Rejects
+   * for a person not linked on this instance, or on a write error.
+   */
+  async walletPass(person: string): Promise<string> {
+    const table = this.walletTable('walletPass');
+    const account = this.links.get(person)?.account;
+    if (!account) throw new Error(`FairMeter.walletPass: ${this.links.has(person) ? 'link_conflict' : 'account_not_linked'}`);
+    const random = randomBytes(32).toString('base64url');
+    await this.ddb.send(new PutCommand({
+      TableName: table,
+      Item: { ...walletKeys.pass(random), account, expiresAt: Math.floor(this.now().getTime() / 1000) + PASS_TTL_SECONDS },
+      ConditionExpression: 'attribute_not_exists(PK)',
+    }));
+    return random;
+  }
+
+  private walletTable(method: string): string {
+    const billing = this.cfg.billing;
+    if (typeof billing !== 'object') throw new Error(`FairMeter.${method}: needs hosted billing`);
+    return billing.walletTable;
+  }
+
+  /**
+   * Hosted: who pays for `person` (their last link on this instance), the fee version's basis points
+   * and the app's floor with its fee; or a ready refusal. Undefined under billing 'none'.
+   */
+  private walletCharge(person: string, at: Date): { table: string; account: string; feeBps: number; floor: number } | Refusal | undefined {
+    const billing = this.cfg.billing;
+    if (typeof billing !== 'object') return undefined;
+    const link = this.links.get(person);
+    if (!link?.account) {
+      console.error(link ? 'LINK_CONFLICT' : 'ACCOUNT_NOT_LINKED', { appId: this.cfg.appId, person });
+      return refuse(403, link ? 'link_conflict' : 'account_not_linked');
+    }
+    const { feeBps } = feeAt(at, billing.fee);
+    return { table: billing.walletTable, account: link.account, feeBps, floor: this.floor + feeOf(this.floor, feeBps) };
+  }
+
+  /** A debit the wallet's available can't cover; a missing BALANCE row is refused the same way and alarms. */
+  private async balanceTooLow(log: Record<string, unknown>, charge: { table: string; account: string }, tier?: BudgetTier): Promise<Refusal> {
+    const { Item } = await this.ddb.send(new GetCommand({ TableName: charge.table, Key: walletKeys.balance(charge.account), ProjectionExpression: 'availableMicroUsd', ConsistentRead: true }));
+    if (Item?.availableMicroUsd === undefined) console.error('BALANCE_MISSING', { ...log, account: charge.account });
+    else console.warn('BALANCE_TOO_LOW', { ...log, account: charge.account, availableMicroUsd: Item.availableMicroUsd });
+    return refuse(402, 'balance_too_low', { topUpUrl: TOP_UP_URL }, tier);
   }
 
   private limitReached(log: Record<string, unknown>, at: Date, tier: BudgetTier): Refusal {
@@ -555,11 +700,11 @@ export class FairMeter {
 }
 
 /** The UsageRecord that settles (or releases) this call (FairMeter.record and FakeFairMeter). Throws only on a hold it can't read. */
-export function settlementRecord(cfg: Pick<FairMeterConfig, 'appId' | 'env'>, call: Reservation, usage: AttemptUsage): UsageRecord {
+export function settlementRecord(cfg: Pick<FairMeterConfig, 'appId' | 'env' | 'billing'>, call: Reservation, usage: AttemptUsage): UsageRecord {
   const h = call.hold;
   const at = new Date(h.at);
   if (!h.price || Number.isNaN(at.getTime()) || typeof h.reservedMicroUsd !== 'number') throw new Error('Unreadable hold');
-  const facts = { appId: cfg.appId, env: cfg.env, callId: call.callId, hold: h };
+  const facts = { appId: cfg.appId, env: cfg.env, callId: call.callId, hold: h, walletTable: typeof cfg.billing === 'object' ? cfg.billing.walletTable : undefined };
   if (usage === 'not_billed' || usage === 'not_sent') return holdRecord(facts, 'release');
   if (usage === 'unknown') return holdRecord(facts, 'aborted');
   const estimate = typeof usage === 'object' && usage !== null && 'estimate' in usage;
@@ -596,7 +741,7 @@ type Timing = { readsMs: number; reserving?: number; attempts: number };
 
 const jitter = () => new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 150));
 
-function refuse(status: Refusal['status'], error: RefusalCode, extra: { resetsAt?: string } = {}, tier?: BudgetTier): Refusal {
+function refuse(status: Refusal['status'], error: RefusalCode, extra: { resetsAt?: string; topUpUrl?: string } = {}, tier?: BudgetTier): Refusal {
   return { ok: false, status, body: { error, ...extra }, headers: {}, ...(tier ? { tier } : {}) };
 }
 
@@ -620,10 +765,11 @@ function usageFacts(shape: PriceShape, usage: CallUsage) {
 
 /**
  * The record that settles a hold: at a priced usage, at the reservation (an estimate), or a
- * release. Shared by FairMeter.record and the sweeper, so both write the same thing.
+ * release. Shared by FairMeter.record and the sweeper, so both write the same thing. A hold with an
+ * account (hosted) also moves that account's wallet, in `walletTable`.
  */
 export function holdRecord(
-  facts: { appId: string; env: string; callId: string; hold: HoldFacts },
+  facts: { appId: string; env: string; callId: string; hold: HoldFacts; walletTable?: string },
   outcome: 'release' | 'aborted' | 'no_usage' | 'swept' | ({ usage: CallUsage; baseCostMicroUsd: number; costMicroUsd: number; band?: string; tier?: string }),
   estimated?: 'aborted',
 ): UsageRecord {
@@ -664,6 +810,14 @@ export function holdRecord(
     ...(release ? { release: true } : {}),
     ...(atReservation && !release ? { estimated: outcome as 'aborted' | 'no_usage' | 'swept' } : estimated ? { estimated } : {}),
   };
+  if (h.account !== undefined) {
+    if (!facts.walletTable || !Number.isInteger(h.feeBps)) throw new Error(`A hosted hold needs the wallet table and its feeBps: ${facts.callId}`);
+    const held = h.reservedMicroUsd + feeOf(h.reservedMicroUsd, h.feeBps!);
+    // The person pays what served them, plus the fee on it, never more than the hold.
+    const paid = cost - absorbedOf(record);
+    const fee = feeOf(paid, h.feeBps!);
+    record.wallet = { table: facts.walletTable, account: h.account, heldMicroUsd: held, feeMicroUsd: fee, chargedMicroUsd: Math.min(paid + fee, held) };
+  }
   record.usageHash = createHash('sha256')
     .update(JSON.stringify([record.kind, record.details, record.costMicroUsd, record.estimated ?? null, record.release ?? false]))
     .digest('hex')

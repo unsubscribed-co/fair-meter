@@ -15,7 +15,7 @@ import { absorbedOf, recordUsage } from './ledger';
  */
 export const SWEEP_AFTER_MS = 30 * 60_000;
 
-export async function sweep(ddb: DynamoDBDocumentClient, cfg: Pick<FairMeterConfig, 'appId' | 'env' | 'tableName'>, now: Date): Promise<{ settled: number }> {
+export async function sweep(ddb: DynamoDBDocumentClient, cfg: Pick<FairMeterConfig, 'appId' | 'env' | 'tableName' | 'billing'>, now: Date): Promise<{ settled: number }> {
   let settled = 0;
   let failed = 0;
   let seen = 0;
@@ -33,7 +33,8 @@ export async function sweep(ddb: DynamoDBDocumentClient, cfg: Pick<FairMeterConf
       seen++;
       const callId = skOf(row).slice('CALL#'.length);
       try {
-        const record = holdRecord({ appId: cfg.appId, env: String(row.env ?? cfg.env), callId, hold: row as HoldFacts }, 'swept');
+        const walletTable = typeof cfg.billing === 'object' ? cfg.billing.walletTable : undefined;
+        const record = holdRecord({ appId: cfg.appId, env: String(row.env ?? cfg.env), callId, hold: row as HoldFacts, walletTable }, 'swept');
         const outcome = await recordUsage(ddb, cfg.tableName, record);
         const facts = { appId: cfg.appId, callId, person: row.person, sku: row.sku, at: row.at, reservedMicroUsd: row.reservedMicroUsd, absorbedMicroUsd: absorbedOf(record), outcome };
         if (outcome === 'recorded') {
