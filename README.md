@@ -2,6 +2,8 @@
 
 Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): every paid thing a person does, an AI call or an action like a new expense, is priced at the published list price and written to an append-only ledger in a DynamoDB table that metering owns, with caps that stop spend before it happens. Self-hosted copies run it with `billing: 'none'`: the ledger and caps stay on, nobody is charged, no fee.
 
+**v0.4.0** adds hosted billing: with `billing: { walletTable }` every hold, settle, release, sweep and rollup charge, plus the fee, moves the person's prepaid wallet in the same transaction as the ledger (see "Hosted billing"). `billing: 'none'` is unchanged, byte for byte.
+
 **v0.3.0** gives metering its own ledger table (a one-time migration copies v0.2.0's rows), adds `usage(person)` so a person sees their spend, charges actions (`canWrite` before a write, `action` after it, a rollup every 15 minutes) at per-app price lists built from AWS's public Price List (the fee has one file and is never applied under `billing: 'none'`), absorbs attempts that didn't serve the person, and ships a test double. `authorize` and `record` keep their signatures and outcomes: see "Upgrading from v0.2.0". The older surface (`Meter`, the record builders, households and plans) is Nieto's, unchanged, until Nieto moves to `FairMeter`; its README follows "Start here".
 
 ## Install
@@ -99,7 +101,7 @@ const metering = new Metering(this, 'Metering', {
 metering.grant(fn); // IAM on the ledger table, the FAIR_METER env, an alarm on fn's metering error lines
 ```
 
-It creates the ledger table, `metering.table` and a stack output: on-demand, `PK`/`SK`, TTL on `expiresAt`, point-in-time recovery, deletion protected and retained when the stack is deleted. Prices, counters, holds and the ledger live there, nothing of your app's; your `authorize` and `record` code needs no table settings. It also creates the retry queue and its Lambda (`MeteringRetry`, DLQ alarms on depth and on a 7-day-old message) and the sweeper: every 10 minutes it settles holds left open for 30 minutes (a crash between authorize and the settle) at their hold, `estimated: 'swept'`, and alarms. Give `fn` its own `logGroup`. Optional: `alarmAction` (without it the alarms exist with no action, fine for dev), `allAppsDailyCapUsd`, `maxCallsPerMinute`, `tiers`. `billing: 'hosted'` is refused until the wallet exists.
+It creates the ledger table, `metering.table` and a stack output: on-demand, `PK`/`SK`, TTL on `expiresAt`, point-in-time recovery, deletion protected and retained when the stack is deleted. Prices, counters, holds and the ledger live there, nothing of your app's; your `authorize` and `record` code needs no table settings. It also creates the retry queue and its Lambda (`MeteringRetry`, DLQ alarms on depth and on a 7-day-old message) and the sweeper: every 10 minutes it settles holds left open for 30 minutes (a crash between authorize and the settle) at their hold, `estimated: 'swept'`, and alarms. Give `fn` its own `logGroup`. Optional: `alarmAction` (without it the alarms exist with no action, fine for dev), `allAppsDailyCapUsd`, `maxCallsPerMinute`, `tiers`, `billing` (see "Hosted billing").
 
 **The retry queue** (`MeteringRetry`, also under `Metering`): a record the app couldn't write waits on the queue and is retried every minute; one that still fails after 10 receives is parked in the DLQ. A message that can never be recorded (not JSON, no `appId`/`sub`/`requestId`/`requestTime`, or no transaction can be built from it) is parked at once, logged `USAGE_RECORD_PARKED` (an error that alarms under `Metering`). Every night at 04:00 UTC a redrive Lambda drains the DLQ: each valid record goes back on the retry queue, at most 3 times per call, counted on `REDRIVE#<app>` / `CALL#<callId>` (kept 30 days); recording is idempotent, so a record already in the ledger ends `duplicate`. Invalid records stay, and so does a call at its third redrive (logged `REDRIVE_LIMIT`), so the DLQ alarms stay on. The manual step when that happens: read the message in the SQS console, fix the cause (bad data, a missing price, a table permission), then redrive it from the console (not counted) or delete it if it must never be recorded; the DLQ drops it 14 days after its first enqueue.
 
@@ -114,7 +116,7 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <n
 
 **Action SKUs** are ordinary price files, `prices/<app>-<action>.json`, with `provider: "aws"` and `unit: "units"` (one unit is one action). Each version has `microUsdPerKUnits` and `components: { database, api, compute, logs, other }`, integer micro-USD per 1,000 actions; the parser requires exactly those five and their sum equal to `microUsdPerKUnits`, and `source` is the AWS Price List URL. They sync and price like any `units` SKU, and `price-history` shows the components. StackSplit's (`stacksplit-new-expense`, `stacksplit-change-expense`) come from its dev measurement, `prices/apps/stacksplit.json`, with the published list in `prices/apps/stacksplit.list.json`.
 
-**The fee** has one home, `prices/fee.json`: `{ "versions": [{ "validFrom", "feeBps" }] }`, in basis points of cost, versioned like a price (today 10000, 100% of cost, from 2026-10-29). `billing: 'none'` means no fee: v0.3.0 never applies it, and `'hosted'` (which will) is refused until the wallet exists. `sync` skips `fee.json` and `prices/apps/`.
+**The fee** has one home, `prices/fee.json`: `{ "versions": [{ "validFrom", "feeBps" }] }`, in basis points of cost, versioned like a price (today 10000, 100% of cost, from 2026-10-29). `billing: 'none'` means no fee; hosted billing adds it to every charge (`Metering` writes the file into the config at synth, since a bundled function has no `prices/`). `sync` skips `fee.json` and `prices/apps/`.
 
 **Reproducing an app's price list.** An app's measurement lives in `prices/apps/<app>.json`: its `region`, per action SKU the measured averages per action (`rru`, `wru`, `apiRequests`, `lambdaRequests`, `billedMs`, `memoryMb`, `logBytes`, from `samples` requests at `measuredAt`), and three profiles, `light`, `regular` and `heavy`, each with actions a day per SKU and AI calls a day per SKU with the average meters of one call:
 
@@ -195,6 +197,30 @@ Why it bounds spend (prepaid, never debt): AI holds can't use the floor (`author
 - 10,000 rows or more in one window (people x SKUs) fail it with `ROLLUP_TRUNCATED`; any failure logs `ROLLUP_FAILED` and the run fails. A run that starts with a window more than 45 minutes old (not settled within the rollup lag, so the floor no longer holds) logs `ROLLUP_LATE`. These terms join the metering error alarm, fed by the rollup's own log group too, and the same alarm also counts the rollup's Lambda errors, so a run that crashes or times out before logging anything alarms there as well (no alarm of its own).
 - Cost: Logs Insights charges per GB scanned ($0.005 at list), and it scans every line of the granted functions' log groups in the window, not only the action lines. Windows don't overlap, so each byte is scanned once: about 1% on top of the $0.50 per GB those logs cost to ingest. One query per window, 96 a day.
 
+### Hosted billing
+
+The wallet (Unsubscribed!'s, one prepaid USD balance per person shared by every hosted app) lives in its own table in the same AWS account and region. Switch an app with one prop; `authorize`, `record`, `canWrite`, `action` and `usage` keep their signatures:
+
+```ts
+const walletTable = dynamodb.Table.fromTableArn(this, 'Wallet', walletTableArn); // e.g. from SSM /wallet/table-arn
+const metering = new Metering(this, 'Metering', { appId: 'stacksplit', env: 'prod', dailyCapUsd: '0.50', appDailyCapUsd: '5', billing: { walletTable } });
+```
+
+Three calls are new:
+
+- `link(person, sub, { email, lang })`: at every sign-in, before hosted calls, with the person's Google account id. A first link writes `LINK#<app>#<person>` and adds `<app>#<person>` to the account's BALANCE `links` (setting its `email` and `lang` labels); the same account again is a no-op (`'linked'`); a LINK that points to another account is never overwritten: `'conflict'`, nothing written, `LINK_CONFLICT`, and the person's hosted calls are refused until support relinks. Hosted calls use the account of the person's last link on this instance: call it on each signed-in request (it reads once per person per instance).
+- `walletPass(person)`: writes `PASS#<random>` (the account, `expiresAt` 2 minutes on) and returns the random value, for the embedded wallet view's URL fragment. The wallet makes it single use.
+- `usage(person)` also returns `wallet: { availableMicroUsd }` for a linked person.
+
+What moves, in the transaction fair-meter already writes (`wallet.ts` has the row types and keys, their one home):
+
+- **Hold**: `availableMicroUsd -= hold + fee`, `heldMicroUsd += hold + fee`, on the condition `availableMicroUsd >= hold + fee + floor + its fee`. Otherwise `402 balance_too_low` with `topUpUrl` (a missing BALANCE row too, logged `BALANCE_MISSING`). An unlinked person is `403 account_not_linked` (`ACCOUNT_NOT_LINKED`), a conflicting link `403 link_conflict`. The hold records its `account` and `feeBps`.
+- **Settle, release, sweep**: the hold's own account, never a fresh lookup. The hold comes back, and the person is charged cost minus absorbed plus the fee on it, never more than the hold (the rest is absorbed); `SPEND#<yyyy-mm>` grows by the charge under the app's id. EVENTs record `feeMicroUsd` and `account`. A settle that waits on the retry queue carries its wallet move.
+- **Rollup**: the action lines carry the account. Per person, SKU and window it reads BALANCE, charges `min(cost + fee, available)` on the condition that available still covers it, and reads again on a refusal or a conflict (3 tries, then the run fails and the window stays due). A shortfall is absorbed on the EVENT and logged `FLOOR_OVERRUN`. Lines from before the switch carry no account and charge no wallet.
+- **`canWrite`**: also one read of BALANCE; available below the floor plus its fee is `402 balance_too_low`. `action` for a person not linked on the instance is `ACTION_UNKNOWN` and writes no line.
+
+Two apps charging one account at once conflict on BALANCE; the existing `TransactionConflict` retry (3 attempts) and the retry queue cover it. The daily caps stay, in list-price cost. IAM: each granted function, the sweeper, the retry Lambda and the rollup get `GetItem` and `UpdateItem` on `WALLET#*` and `LINK#*`, limited by `dynamodb:Attributes` to the key, `availableMicroUsd`, `heldMicroUsd`, `spentMicroUsd`, the app's own SPEND counter, `links`, `email`, `lang` and `account`, and `PutItem` on `PASS#*` (`account`, `expiresAt`), with `dynamodb:Select` and `dynamodb:ReturnValues` restricted so no request reads a whole item. `FLOOR_OVERRUN`, `ACCOUNT_NOT_LINKED`, `LINK_CONFLICT` and `BALANCE_MISSING` join the metering error alarm.
+
 ### Testing your metering code
 
 `fair-meter/testing` exports `FakeFairMeter`: the same public methods as `FairMeter` (the `FairMeterApi` type), in memory, so an app's tests need no DynamoDB and no SDK mocks. Inject either:
@@ -210,7 +236,14 @@ meter.rollUp(person, 7_001); // what the rollup charges: the person is now read-
 expect(meter.calls).toContainEqual({ method: 'action', args: [{ person, sku: 'myapp-add' }] });
 ```
 
-Options: `dailyCapMicroUsd` (default 500,000, $0.50), `actions` and `actionFloorMicroUsd` (as `Metering` writes them), `tiers`, `prices` (default: the price files in this package's `prices/`) and `now`. It holds and settles like `FairMeter`, with the same outcomes, refusal bodies and `usage`: a shared test runs the same scenarios against both, `FairMeter` on DynamoDB Local. Where they differ: the fake answers a repeat of a settle with `duplicate` and another payload with `conflict` at once, while `FairMeter` answers those within DynamoDB's 10-minute idempotency window with `recorded` or `deferred`; it has no sweeper, retry queue, app or all-apps breaker or `maxCallsPerMinute` brake (use `refuseNext` for those refusals); and it logs only `ACTION_UNKNOWN`, `RECORD_CONFLICT` and the settle's alarms (`USAGE_MISSING`, `RESERVATION_EXCEEDED`), so `action` writes no line.
+Options: `dailyCapMicroUsd` (default 500,000, $0.50), `actions` and `actionFloorMicroUsd` (as `Metering` writes them), `tiers`, `prices` (default: the price files in this package's `prices/`), `now` and `hosted` (wallets in memory: `fund(account, availableMicroUsd)`, then `link`; holds, settles, `rollUp`, `canWrite` and `usage` move and read them as `FairMeter` does, with the fee of `prices/fee.json`). It holds and settles like `FairMeter`, with the same outcomes, refusal bodies and `usage`: a shared test runs the same scenarios against both, `FairMeter` on DynamoDB Local. Where they differ: the fake answers a repeat of a settle with `duplicate` and another payload with `conflict` at once, while `FairMeter` answers those within DynamoDB's 10-minute idempotency window with `recorded` or `deferred`; it has no sweeper, retry queue, app or all-apps breaker or `maxCallsPerMinute` brake (use `refuseNext` for those refusals); and it logs only `ACTION_UNKNOWN`, `RECORD_CONFLICT` and the settle's alarms (`USAGE_MISSING`, `RESERVATION_EXCEEDED`), so `action` writes no line.
+
+### Known limits (v0.4.0)
+
+- **A true-up doesn't move the wallet.** A late real usage after the sweeper's estimate writes its ADJUST as before, but the swept hold was already given back at $0: the operator absorbs that call.
+- **The daily caps are in list-price cost,** not charged amounts: with the 100% fee a $0.50 cap lets a person be charged up to $1.00 a day.
+- **`dynamodb:Attributes` on update expressions is not checked by DynamoDB Local.** Run a hosted hold, settle, rollup, link and pass in a dev deploy before relying on the policy.
+- **Two lines for one person, SKU and window with different accounts** (a move mid-window) share one EVENT key: the second is a duplicate and isn't charged.
 
 ### Known limits (v0.3.0)
 

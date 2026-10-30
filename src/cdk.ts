@@ -21,7 +21,7 @@ import { usdToMicroUsd } from './cost';
 import { EXPORT_COLUMNS, streamFilterPattern } from './export';
 import type { Actions, FairMeterConfig } from './fair-meter';
 import { assertAppId, DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
-import { loadPriceFiles } from './prices';
+import { loadFeeFile, loadPriceFiles } from './prices';
 import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
 
 // esbuild skips tsconfig files inside node_modules, so name ours or the handlers lose "use strict" in an app's bundle.
@@ -589,8 +589,13 @@ export interface MeteringProps {
   /** Calls per person per UTC minute (a brake against loops). */
   maxCallsPerMinute?: number;
   tiers?: TierThresholds;
-  /** 'hosted' needs the wallet, which doesn't exist yet: refused at synth. */
-  billing?: 'none' | 'hosted';
+  /**
+   * 'none' (default): nobody is charged, no wallet. `{ walletTable }` (the wallet's table, same
+   * account and region): every charge, plus the fee, moves the person's wallet in the ledger's own
+   * transactions; the app's functions, the sweeper, the retry Lambda and the rollup get scoped IAM on it.
+   * The bare string 'hosted' (v0.3's placeholder) is refused at synth.
+   */
+  billing?: 'none' | { walletTable: dynamodb.ITable } | 'hosted';
   /** The app's actions (`action`, `canWrite`); the floor is computed from these at synth. Omitted: no actions. */
   actions?: {
     /** Action SKUs, each a `unit: "units"` price file in this package's prices/. */
@@ -611,6 +616,32 @@ export interface MeteringProps {
 /** Log terms that mean money may be wrong or calls are refused; each alarms within 5 minutes. */
 const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED', 'RESERVATION_EXCEEDED', 'USAGE_RECORD_PARKED', 'ACTION_UNKNOWN',
   'ACTION_UNPRICED', 'ROLLUP_TRUNCATED', 'ROLLUP_FAILED', 'ROLLUP_LATE'];
+/** Hosted billing adds these: a rollup charge the wallet couldn't cover, and the refusals support must look at. */
+const WALLET_ERRORS = ['FLOOR_OVERRUN', 'ACCOUNT_NOT_LINKED', 'LINK_CONFLICT', 'BALANCE_MISSING'];
+
+/**
+ * What an app's code may do on the wallet table (wallet ADR 0001): read and conditionally ADD to the
+ * guard and spend counters, its own SPEND# counter and the link fields, under WALLET# and LINK#
+ * only; write PASS# rows. Never read a whole item, never return old or new items, never touch
+ * credits, refunds or moves. The attributes include the table's key, as IAM requires.
+ */
+function walletStatements(table: dynamodb.ITable, appId: string): iam.PolicyStatement[] {
+  // ForAllValues is true for an empty set: the Null check makes the attribute list required.
+  const scoped = (leadingKeys: string[], attributes: string[]) => ({
+    'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': leadingKeys },
+    'ForAllValues:StringEquals': { 'dynamodb:Attributes': ['PK', 'SK', ...attributes] },
+    Null: { 'dynamodb:Attributes': 'false' },
+    StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES', 'dynamodb:ReturnValues': ['NONE', 'UPDATED_OLD', 'UPDATED_NEW'] },
+  });
+  return [
+    new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      resources: [table.tableArn],
+      conditions: scoped(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', appId, 'links', 'email', 'lang', 'account']),
+    }),
+    new iam.PolicyStatement({ actions: ['dynamodb:PutItem'], resources: [table.tableArn], conditions: scoped(['PASS#*'], ['account', 'expiresAt']) }),
+  ];
+}
 
 /**
  * FairMeter's infrastructure, from one config: the retry queue (MeteringRetry), the sweeper that
@@ -634,13 +665,19 @@ export class Metering extends Construct {
   private readonly concurrency?: { max: number; reserved: number };
   /** The granted functions' log group names, which the rollup queries. */
   private readonly logGroups: string[] = [];
+  /** Hosted billing: the wallet table's statements, and the error terms its lines add. */
+  private readonly wallet?: iam.PolicyStatement[];
+  private readonly errorTerms: string[];
 
   constructor(scope: Construct, id: string, props: MeteringProps) {
     super(scope, id);
     // Untyped callers still passing v0.2.0's prop would otherwise write to a table nobody reads.
     if ((props as { table?: unknown }).table) throw new Error('Metering: v0.3.0 owns its ledger table: see Upgrading in the README');
     assertAppId(props.appId);
-    if (props.billing === 'hosted') throw new Error("Metering: billing 'hosted' needs the wallet, which v0.2.0 doesn't have");
+    const walletTable = typeof props.billing === 'object' && props.billing !== null ? props.billing.walletTable : undefined;
+    if (!walletTable && props.billing !== undefined && props.billing !== 'none') throw new Error("Metering: billing is 'none' or { walletTable } (the wallet's table)");
+    this.wallet = walletTable && walletStatements(walletTable, props.appId);
+    this.errorTerms = walletTable ? [...METERING_ERRORS, ...WALLET_ERRORS] : METERING_ERRORS;
     const cap = (name: string, usd: string) => {
       const micro = usdToMicroUsd(usd);
       if (micro <= 0) throw new Error(`Metering: ${name} must be above 0`);
@@ -678,6 +715,7 @@ export class Metering extends Construct {
     this.retry = new MeteringRetry(this, 'Retry', { table: this.table, alarmAction: props.alarmAction });
     // FairMeter records: a refused settle reads the EVENT, and a settle deletes the PENDING row.
     this.table.grant(this.retry.fn, 'dynamodb:GetItem', 'dynamodb:DeleteItem');
+    this.grantWallet(this.retry.fn);
     this.config = {
       appId: props.appId,
       env: props.env,
@@ -689,6 +727,8 @@ export class Metering extends Construct {
       ...(props.maxCallsPerMinute !== undefined ? { maxCallsPerMinute: props.maxCallsPerMinute } : {}),
       ...(props.tiers ? { tiers: props.tiers } : {}),
       ...(actions ? { actions, actionFloorMicroUsd } : {}),
+      // The fee rides in the config: a bundled function has no prices/ to read.
+      ...(walletTable ? { billing: { walletTable: walletTable.tableName, fee: loadFeeFile() } } : {}),
     };
 
     const sweeperLogs = monthOfLogs(this, 'SweeperLogs');
@@ -699,6 +739,7 @@ export class Metering extends Construct {
       logGroup: sweeperLogs,
     });
     this.table.grant(this.sweeper, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
+    this.grantWallet(this.sweeper);
     new events.Rule(this, 'SweeperSchedule', {
       description: `Settle ${props.appId} reservations left open for 30 minutes`,
       schedule: events.Schedule.rate(cdk.Duration.minutes(10)),
@@ -747,6 +788,7 @@ export class Metering extends Construct {
       });
       // Prices, the cursor and the usage transaction. StartQuery is granted per log group in grant().
       this.table.grant(rollup, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem');
+      this.grantWallet(rollup);
       rollup.addToRolePolicy(new iam.PolicyStatement({ actions: ['logs:GetQueryResults'], resources: ['*'] }));
       // On the quarter hours: rate() can start anywhere in a window, so a window could wait 45 minutes, the whole rollup lag, before its run starts.
       new events.Rule(this, 'RollupSchedule', {
@@ -763,7 +805,7 @@ export class Metering extends Construct {
       this.watchErrors(rollup);
       this.rollup = rollup;
     }
-    alarm('ErrorsAlarm', `${where}: a metering error (${METERING_ERRORS.join(', ')})${actions ? ' or a failed rollup run' : ''}: check the app function's logs`, errors);
+    alarm('ErrorsAlarm', `${where}: a metering error (${this.errorTerms.join(', ')})${actions ? ' or a failed rollup run' : ''}: check the app function's logs`, errors);
   }
 
   /**
@@ -782,6 +824,7 @@ export class Metering extends Construct {
     }
     this.table.grant(fn, 'dynamodb:Query', 'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem');
     this.retry.queue.grantSendMessages(fn);
+    this.grantWallet(fn);
     fn.addEnvironment('FAIR_METER', cdk.Stack.of(this).toJsonString(this.config));
     this.watchErrors(fn);
     if (this.rollup) {
@@ -790,11 +833,16 @@ export class Metering extends Construct {
     }
   }
 
+  /** Hosted billing: the wallet table, scoped (walletStatements). Nothing under billing 'none'. */
+  private grantWallet(fn: lambda.Function) {
+    for (const statement of this.wallet ?? []) fn.addToRolePolicy(statement);
+  }
+
   /** Counts `fn`'s metering error lines into the ErrorsAlarm metric. */
   private watchErrors(fn: lambda.Function) {
     new logs.MetricFilter(this, `Errors${this.grants++}`, {
       logGroup: fn.logGroup,
-      filterPattern: logs.FilterPattern.anyTerm(...METERING_ERRORS),
+      filterPattern: logs.FilterPattern.anyTerm(...this.errorTerms),
       metricNamespace: this.errors.namespace,
       metricName: this.errors.metricName,
       metricValue: '1',

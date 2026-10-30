@@ -10,7 +10,7 @@ A metering library that apps embed (public, AGPL-3.0). Apps call `FairMeter.auth
 ## Rules
 
 - Money is integer micro-USD, rounded up. Money records (EVENT, ADJUST) are never deleted or rewritten; a correction is a new ADJUST.
-- `env` is a first-class field on every record. `billing: 'none'` is the default; `'hosted'` is refused until the wallet exists.
+- `env` is a first-class field on every record. `billing: 'none'` is the default and must not change (its template is pinned); hosted billing is `{ walletTable }`.
 - Zero behaviour change for existing callers unless a spec lists the change. The old `Meter` surface is Nieto's: its golden tests must stay green.
 - Public repo: no AWS bill figures, profit, account ids or personal data, in code, tests, docs or commit messages.
 - The smallest complete design; no speculative options.

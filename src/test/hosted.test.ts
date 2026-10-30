@@ -3,6 +3,7 @@ import { CreateTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { mockClient } from 'aws-sdk-client-mock';
+import * as root from '../index';
 import { FairMeter, settlementRecord, type CallRequest, type FairMeterConfig, type Reservation } from '../fair-meter';
 import { syncPrices } from '../prices-cli';
 import { loadPriceFiles } from '../prices';
@@ -397,4 +398,16 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await events(person)).toEqual([expect.objectContaining({ estimated: 'swept', feeMicroUsd: 0, account })]);
     });
   });
+});
+
+test("the wallet's row keys are exported from the package root, their one home", () => {
+  expect(root.walletKeys.balance('acc')).toEqual({ PK: 'WALLET#acc', SK: 'BALANCE' });
+  expect(root.walletKeys.spend('acc', '2026-11')).toEqual({ PK: 'WALLET#acc', SK: 'SPEND#2026-11' });
+  expect(root.walletKeys.link('stacksplit', 'ana@x.co')).toEqual({ PK: 'LINK#stacksplit#ana@x.co', SK: 'LINK' });
+  expect(root.walletKeys.pass('r')).toEqual({ PK: 'PASS#r', SK: 'PASS' });
+  const balance: root.WalletBalance = { availableMicroUsd: 0 };
+  const link: root.WalletLink = { account: 'acc' };
+  const pass: root.WalletPass = { account: 'acc', expiresAt: 0 };
+  const spend: root.WalletSpend = { stacksplit: 0 };
+  expect([balance, link, pass, spend]).toHaveLength(4);
 });

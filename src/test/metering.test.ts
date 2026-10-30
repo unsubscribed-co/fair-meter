@@ -220,6 +220,52 @@ test('the export gains env, paidBy, estimated and reservedMicroUsd at the end of
   expect(row).toMatchObject({ env: 'prod', paidBy: 'credit', estimated: 'swept', reservedMicroUsd: 9 });
 });
 
+describe('hosted billing: { walletTable }', () => {
+  const WALLET_ARN = 'arn:aws:dynamodb:us-east-2:111111111111:table/wallet';
+  function hosted() {
+    const app = new cdk.App({ context: { 'aws:cdk:bundling-stacks': [] } });
+    const s = new cdk.Stack(app, 'S');
+    const walletTable = dynamodb.Table.fromTableArn(s, 'Wallet', WALLET_ARN);
+    const fn = new lambda.Function(s, 'Api', { runtime: lambda.Runtime.NODEJS_24_X, handler: 'index.handler', code: lambda.Code.fromInline('x'), logGroup: new logs.LogGroup(s, 'ApiLogs') });
+    const metering = new Metering(s, 'Metering', { appId: 'stacksplit', env: 'prod', dailyCapUsd: '0.50', appDailyCapUsd: '5', billing: { walletTable }, actions: { skus: ['stacksplit-new-expense'] } });
+    metering.grant(fn);
+    return { t: Template.fromStack(s), s, metering };
+  }
+  const walletStatements = (t: Template, prefix: string) =>
+    Object.entries(t.findResources('AWS::IAM::Policy')).find(([id]) => id.startsWith(prefix))![1].Properties.PolicyDocument.Statement
+      .filter((st: any) => JSON.stringify(st.Resource).includes('table/wallet'));
+  const scoped = (leadingKeys: string[], attributes: string[]) => ({
+    'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': leadingKeys },
+    'ForAllValues:StringEquals': { 'dynamodb:Attributes': ['PK', 'SK', ...attributes] },
+    Null: { 'dynamodb:Attributes': 'false' },
+    StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES', 'dynamodb:ReturnValues': ['NONE', 'UPDATED_OLD', 'UPDATED_NEW'] },
+  });
+
+  test('the config names the wallet table and carries the fee of prices/fee.json', () => {
+    const { metering } = hosted();
+    expect(metering.config.billing).toEqual({ walletTable: 'wallet', fee: { versions: [{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000 }] } });
+  });
+
+  test.each(['ApiServiceRoleDefaultPolicy', 'MeteringSweeperServiceRoleDefaultPolicy', 'MeteringRetryFnServiceRoleDefaultPolicy', 'MeteringRollupServiceRoleDefaultPolicy'])(
+    '%s: GetItem and UpdateItem on WALLET# and LINK# for the counters, its own SPEND counter and the link fields; PutItem on PASS# only; nothing else',
+    (prefix) => {
+      expect(walletStatements(hosted().t, prefix)).toEqual([
+        {
+          Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'], Resource: WALLET_ARN,
+          Condition: scoped(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'links', 'email', 'lang', 'account']),
+        },
+        { Effect: 'Allow', Action: 'dynamodb:PutItem', Resource: WALLET_ARN, Condition: scoped(['PASS#*'], ['account', 'expiresAt']) },
+      ]);
+    },
+  );
+
+  test('its error terms join the metering error alarm', () => {
+    hosted().t.hasResourceProperties('AWS::Logs::MetricFilter', {
+      FilterPattern: Match.stringLikeRegexp('ROLLUP_LATE.*FLOOR_OVERRUN.*ACCOUNT_NOT_LINKED.*LINK_CONFLICT.*BALANCE_MISSING'), LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') },
+    });
+  });
+});
+
 describe('actions: the floor and the write check', () => {
   const skus = ['stacksplit-new-expense', 'stacksplit-edit-expense'];
   const env = (t: Template, s: cdk.Stack) => JSON.parse(JSON.stringify(s.resolve(Object.entries(t.findResources('AWS::Lambda::Function')).find(([id]) => id.startsWith('Api'))![1].Properties.Environment.Variables.FAIR_METER)));

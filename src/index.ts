@@ -17,3 +17,4 @@ export * from './reprice';
 export * from './statement';
 export * from './usage';
 export * from './report';
+export * from './wallet';

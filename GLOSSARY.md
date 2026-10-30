@@ -54,7 +54,7 @@ A person's settled cost today plus their open holds (`committedMicroUsd`): what 
 
 **Room**:
 The daily cap minus committed: what the person may still spend today.
-_Avoid_: balance (until the wallet exists), remaining credit
+_Avoid_: balance, remaining credit
 
 **Daily cap**:
 The hard per-person limit per UTC day, enforced atomically.
@@ -82,6 +82,15 @@ Read and write request units: the DynamoDB capacity a write consumed, measured p
 **Fee**:
 The declared share added on top of list price for the project; it has one home (`prices/fee.json`) and is zero when billing is `none`.
 _Avoid_: markup, margin
+
+## Hosted billing
+
+**Wallet**:
+A person's prepaid USD balance, shared by every hosted app, in the wallet's own table. Under `billing: { walletTable }` every charge moves it in the ledger's own transaction. Its words (available, account, link, pass) are defined in the wallet's glossary.
+
+**Charged amount**:
+What the wallet pays for an EVENT: cost minus absorbed plus the fee on it, never more than the hold. Cost and fee are recorded apart (`costMicroUsd`, `feeMicroUsd`).
+_Avoid_: price
 
 **Ledger table**:
 The DynamoDB table the `Metering` construct owns: prices, counters, holds and the ledger, nothing of the app's.
