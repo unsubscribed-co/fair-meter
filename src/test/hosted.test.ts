@@ -32,7 +32,10 @@ const config: FairMeterConfig = {
   dailyCapMicroUsd: 500_000, appDailyCapMicroUsd: 100_000_000, billing: { walletTable: WALLET, fee: FEE },
 };
 const AT = new Date('2026-11-03T14:05:09.120Z');
-const meter = (cfg: Partial<FairMeterConfig> = {}) => new FairMeter({ ...config, ...cfg }, { ddb, sqs: new SQSClient({ region: 'us-east-1' }), now: () => AT });
+const meter = (cfg: Partial<FairMeterConfig> = {}, now = () => AT) => new FairMeter({ ...config, ...cfg }, { ddb, sqs: new SQSClient({ region: 'us-east-1' }), now });
+/** What support does to relink a person (the wallet's admin command), reduced to the LINK row. */
+const relink = (person: string, account: string) =>
+  ddb.send(new UpdateCommand({ TableName: WALLET, Key: { PK: `LINK#stacksplit#${person}`, SK: 'LINK' }, UpdateExpression: 'SET account = :a', ExpressionAttributeValues: { ':a': account } }));
 const RESERVED = 5_798; // 30,000 bytes in, 4,096 out at Haiku 5.5
 const HELD = 2 * RESERVED; // the hold plus the 100% fee
 const ask = (person: string): CallRequest => ({ person, sku: 'claude-haiku-5-5', max: { inputTokens: 30_000, outputTokens: 4_096 } });
@@ -117,11 +120,46 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await balance(account)).toMatchObject({ links: new Set([`stacksplit#${person}`]), email: 'first@x.co', lang: 'es' });
     });
 
-    test('the same account again (any instance): a no-op', async () => {
-      const { person, account } = await linked('again', 1_000);
-      await fund(account, 1_000);
-      expect(await meter().link(person, account, { email: 'new@x.co', lang: 'en' })).toBe('linked');
-      expect(await balance(account)).toEqual({ PK: `WALLET#${account}`, SK: 'BALANCE', availableMicroUsd: 1_000, heldMicroUsd: 0, spentMicroUsd: 0 });
+    test('the same account and labels again (any instance): nothing written', async () => {
+      const { m, person, account } = await linked('again', 1_000);
+      const before = await balance(account);
+      const writes = jest.spyOn(ddb, 'send');
+      expect(await m.link(person, account, { email: person, lang: 'es' })).toBe('linked');
+      expect(await meter().link(person, account, { email: person, lang: 'es' })).toBe('linked');
+      expect(writes.mock.calls.filter(([c]) => !(c instanceof GetCommand))).toEqual([]);
+      expect(await balance(account)).toEqual(before);
+    });
+
+    test('the same account with a changed email or lang (an app keyed by account id): only the labels are updated', async () => {
+      const { m, person, account } = await linked('relabel', 1_000);
+      expect(await m.link(person, account, { email: 'renamed@x.co', lang: 'es' })).toBe('linked');
+      expect(await balance(account)).toMatchObject({ email: 'renamed@x.co', lang: 'es', availableMicroUsd: 1_000, links: new Set([`stacksplit#${person}`]) });
+      expect(await meter().link(person, account, { email: 'renamed@x.co', lang: 'en' })).toBe('linked');
+      expect(await balance(account)).toMatchObject({ email: 'renamed@x.co', lang: 'en', availableMicroUsd: 1_000 });
+    });
+
+    test('support relinks a conflicting person: their next hosted call goes through, no restart', async () => {
+      const { m, person } = await linked('relinked', 1_000);
+      const newcomer = sub('relinked-new');
+      await fund(newcomer, 100_000);
+      expect(await m.link(person, newcomer, { email: person, lang: 'en' })).toBe('conflict');
+      expect(await m.authorize(ask(person))).toMatchObject({ ok: false, body: { error: 'link_conflict' } });
+      await relink(person, newcomer);
+      expect(await m.authorize(ask(person))).toMatchObject({ ok: true, hold: { account: newcomer } });
+      expect(await balance(newcomer)).toMatchObject({ heldMicroUsd: HELD });
+    });
+
+    test('a link is remembered 5 minutes: after support moves the person, the next link then reads LINK again', async () => {
+      let clock = AT;
+      const { person, account } = await linked('moved', 100_000);
+      const m = meter({}, () => clock);
+      expect(await m.link(person, account, { email: person, lang: 'es' })).toBe('linked');
+      await relink(person, sub('moved-to'));
+      clock = new Date(AT.getTime() + 4 * 60_000);
+      expect(await m.link(person, account, { email: person, lang: 'es' })).toBe('linked');
+      clock = new Date(AT.getTime() + 5 * 60_000);
+      expect(await m.link(person, account, { email: person, lang: 'es' })).toBe('conflict');
+      expect(await m.authorize(ask(person))).toMatchObject({ ok: false, body: { error: 'link_conflict' } });
     });
 
     test('another account: conflict, nothing written, LINK_CONFLICT; that person is refused link_conflict', async () => {

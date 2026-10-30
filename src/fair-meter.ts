@@ -1,11 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
-import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { pastFloor } from './actions';
 import { assertTierThresholds, dayTier, type BudgetTier, type TierThresholds } from './budget';
 import type { Meters } from './cost';
-import { assertAppId, keys, nextUtcDay, nextUtcMonth, pkNotExists, secondsToNextUtcMinute, setTableKeys, skOf, tableKeys, utcDay, utcMinute, utcMonth, type TableKeys } from './keys';
+import { assertAppId, conditionFailed, keys, nextUtcDay, nextUtcMonth, pkNotExists, secondsToNextUtcMinute, setTableKeys, skOf, tableKeys, utcDay, utcMinute, utcMonth, type TableKeys } from './keys';
 import { absorbedOf, recordUsage, type UsageRecord } from './ledger';
 import { takeCapacity } from './measure';
 import { Meter } from './meter';
@@ -200,8 +200,8 @@ export class FairMeter {
   private readonly prices = new Map<string, { readAt: number; versions: Record<string, any>[] }>();
   /** Actions per person in the current UTC minute, this instance only; a new minute starts an empty map. */
   private actionCounts = { minute: '', perPerson: new Map<string, number>() };
-  /** Hosted: each person's last `link` on this instance: the account that pays, or none (a link conflict). */
-  private readonly links = new Map<string, { sub: string; account?: string }>();
+  /** Hosted: each person's last `link` on this instance: the account that pays (none: a link conflict), the labels, when LINK was read. */
+  private readonly links = new Map<string, { sub: string; account?: string; email: string; lang: string; readAt: number }>();
 
   /** Reads FAIR_METER when `config` is omitted. Throws on a bad config (startup, never after a paid call). */
   constructor(config?: FairMeterConfig, clients: { ddb?: DynamoDBDocumentClient; sqs?: SQSClient; now?: () => Date } = {}) {
@@ -263,7 +263,7 @@ export class FairMeter {
     const at = this.now();
     const day = utcDay(at);
     const log = { appId, person: req.person, sku: req.sku };
-    const charge = this.walletCharge(req.person, at);
+    const charge = await this.walletCharge(req.person, at);
     if (charge && 'ok' in charge) return charge;
     let read;
     const reading = Date.now();
@@ -540,7 +540,7 @@ export class FairMeter {
         console.warn('RATE_LIMITED', { ...log, perPersonPerMinute: a!.perPersonPerMinute });
         return { ok: false, status: 429, body: { error: 'too_many_requests', retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) } };
       }
-      const charge = this.walletCharge(person, at);
+      const charge = await this.walletCharge(person, at);
       if (charge && 'ok' in charge) return charge;
       const [{ Item }, wallet] = await Promise.all([
         this.ddb.send(new GetCommand({ TableName: this.cfg.tableName, Key: keys.userDay(person, this.cfg.appId, utcDay(at)) })),
@@ -573,21 +573,32 @@ export class FairMeter {
    * Hosted, at every sign-in: which account pays for `person`. A first link writes LINK and adds it to
    * the account's BALANCE `links`, with the email and lang labels; the same account again is a no-op;
    * another account is 'conflict', writes nothing, and this person's hosted calls are refused
-   * link_conflict until support relinks (wallet ADR 0003). Remembered per instance: hosted calls
-   * use the account of the person's last link here. Rejects on a read or write error.
+   * link_conflict until support relinks (wallet ADR 0003). A changed email or lang on the same
+   * account updates those labels only (an app keyed by account id never relinks). Remembered per
+   * instance for 5 minutes, so a relink by support or a move is seen within that: hosted calls use
+   * the account of the person's last link here. Rejects on a read or write error.
    */
   async link(person: string, sub: string, labels: { email: string; lang: string }): Promise<LinkOutcome> {
     const table = this.walletTable('link');
     if (typeof person !== 'string' || !person || typeof sub !== 'string' || !sub) throw new Error('FairMeter.link: person and sub are required');
+    const at = this.now().getTime();
     const known = this.links.get(person);
-    if (known?.sub === sub) return known.account ? 'linked' : 'conflict';
+    if (known?.sub === sub && at - known.readAt >= 0 && at - known.readAt < LINK_CACHE_MS) {
+      if (known.account && (known.email !== labels.email || known.lang !== labels.lang)) await this.relabel(table, sub, labels);
+      this.links.set(person, { ...known, ...labels });
+      return known.account ? 'linked' : 'conflict';
+    }
     const key = walletKeys.link(this.cfg.appId, person);
     for (let attempt = 0; ; attempt++) {
-      const { Item } = await this.ddb.send(new GetCommand({ TableName: table, Key: key, ProjectionExpression: 'account', ConsistentRead: true }));
+      const [{ Item }, { Item: shown }] = await Promise.all([
+        this.ddb.send(new GetCommand({ TableName: table, Key: key, ProjectionExpression: 'account', ConsistentRead: true })),
+        this.ddb.send(new GetCommand({ TableName: table, Key: walletKeys.balance(sub), ProjectionExpression: 'email, lang' })),
+      ]);
       if (Item) {
         const same = Item.account === sub;
         if (!same) console.error('LINK_CONFLICT', { appId: this.cfg.appId, person });
-        this.links.set(person, { sub, ...(same ? { account: sub } : {}) });
+        else if (shown?.email !== labels.email || shown?.lang !== labels.lang) await this.relabel(table, sub, labels);
+        this.links.set(person, { sub, ...(same ? { account: sub } : {}), ...labels, readAt: at });
         return same ? 'linked' : 'conflict';
       }
       try {
@@ -604,7 +615,7 @@ export class FairMeter {
             },
           ],
         }));
-        this.links.set(person, { sub, account: sub });
+        this.links.set(person, { sub, account: sub, ...labels, readAt: at });
         return 'linked';
       } catch (err) {
         // Another instance linked this person first (or the BALANCE was busy): read again, then decide.
@@ -632,6 +643,17 @@ export class FairMeter {
     return random;
   }
 
+  /** The labels on an existing BALANCE row, and nothing else. */
+  private async relabel(table: string, account: string, labels: { email: string; lang: string }) {
+    await this.ddb.send(new UpdateCommand({
+      TableName: table,
+      Key: walletKeys.balance(account),
+      UpdateExpression: 'SET email = :email, lang = :lang',
+      ConditionExpression: 'attribute_exists(PK)',
+      ExpressionAttributeValues: { ':email': labels.email, ':lang': labels.lang },
+    })).catch((err) => { if (!conditionFailed(err)) throw err; });
+  }
+
   private walletTable(method: string): string {
     const billing = this.cfg.billing;
     if (typeof billing !== 'object') throw new Error(`FairMeter.${method}: needs hosted billing`);
@@ -642,10 +664,15 @@ export class FairMeter {
    * Hosted: who pays for `person` (their last link on this instance), the fee version's basis points
    * and the app's floor with its fee; or a ready refusal. Undefined under billing 'none'.
    */
-  private walletCharge(person: string, at: Date): { table: string; account: string; feeBps: number; floor: number } | Refusal | undefined {
+  private async walletCharge(person: string, at: Date): Promise<{ table: string; account: string; feeBps: number; floor: number } | Refusal | undefined> {
     const billing = this.cfg.billing;
     if (typeof billing !== 'object') return undefined;
     const link = this.links.get(person);
+    if (link && !link.account) {
+      // A conflict support may have resolved since: LINK read again before refusing.
+      const { Item } = await this.ddb.send(new GetCommand({ TableName: billing.walletTable, Key: walletKeys.link(this.cfg.appId, person), ProjectionExpression: 'account', ConsistentRead: true }));
+      if (Item?.account === link.sub) link.account = link.sub;
+    }
     if (!link?.account) {
       console.error(link ? 'LINK_CONFLICT' : 'ACCOUNT_NOT_LINKED', { appId: this.cfg.appId, person });
       return refuse(403, link ? 'link_conflict' : 'account_not_linked');
@@ -735,6 +762,8 @@ function badRequest(req: CallRequest | undefined): string | undefined {
 }
 
 const PRICE_CACHE_MS = 5 * 60_000;
+/** How long a link is trusted on an instance before `link` reads LINK again (a relink by support, a move). */
+const LINK_CACHE_MS = 5 * 60_000;
 
 /** AUTHORIZE_TIMING's facts as authorize goes: the reads' ms, when the reserve began, its sends. */
 type Timing = { readsMs: number; reserving?: number; attempts: number };
