@@ -28,8 +28,15 @@ export interface WalletLink {
   account: string;
 }
 
-/** `WALLET#<account>` / `SPEND#<yyyy-mm>`: one attribute per app id, the month's charged micro-USD. */
+/**
+ * `WALLET#<account>` / `SPEND#<yyyy-mm>`: per app id, the month's charged micro-USD under the app id, and since v0.4.1 its
+ * two parts under `spendParts(appId)`: the providers' cost (cost minus absorbed) and the project's fee, charged = cost + fee.
+ * A month charged partly before v0.4.1 has parts that sum to less than its charge.
+ */
 export type WalletSpend = Record<string, number>;
+
+/** The SPEND row's attributes for an app's charge split into cost and fee (app ids never contain '#'). */
+export const spendParts = (appId: string) => ({ cost: `${appId}#costMicroUsd`, fee: `${appId}#feeMicroUsd` });
 
 /** `PASS#<random>` / `PASS`: a single-use ticket to the embedded view, written by an app's backend. */
 export interface WalletPass {

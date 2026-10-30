@@ -326,7 +326,8 @@ suite('hosted billing against DynamoDB Local', () => {
       await fund(account, 100_000);
       expect(await rollUp('rolla', [{ person, n: 1_000, account }])).toMatchObject({ recorded: 1 });
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000 - 2 * THOUSAND, spentMicroUsd: 2 * THOUSAND, heldMicroUsd: 0 });
-      expect(await spend(account)).toMatchObject({ rolla: 2 * THOUSAND });
+      // The charge and its two parts: the providers' cost and the project's fee, charged = cost + fee.
+      expect(await spend(account)).toMatchObject({ rolla: 2 * THOUSAND, 'rolla#costMicroUsd': THOUSAND, 'rolla#feeMicroUsd': THOUSAND });
       const [event] = (await events(person)).filter((e) => e.appId === 'rolla');
       expect(event).toMatchObject({ costMicroUsd: THOUSAND, feeMicroUsd: THOUSAND, account });
       expect(event).not.toHaveProperty('absorbedMicroUsd');
@@ -347,7 +348,7 @@ suite('hosted billing against DynamoDB Local', () => {
       await fund(account, 5_000);
       await rollUp('rollb', [{ person, n: 1_000, account }]);
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 0, spentMicroUsd: 5_000 });
-      expect(await spend(account)).toMatchObject({ rollb: 5_000 });
+      expect(await spend(account)).toMatchObject({ rollb: 5_000, 'rollb#costMicroUsd': 2_500, 'rollb#feeMicroUsd': 2_500 });
       // The 5,000 charged is cost and fee at the fee's rate (2,500 each): only cost is absorbed.
       expect((await events(person)).find((e) => e.appId === 'rollb')).toMatchObject({ costMicroUsd: THOUSAND, feeMicroUsd: 2_500, absorbedMicroUsd: THOUSAND - 2_500, account });
       expect(console.error).toHaveBeenCalledWith('FLOOR_OVERRUN', expect.objectContaining({ account, chargedMicroUsd: 5_000, absorbedMicroUsd: THOUSAND - 2_500 }));
@@ -422,7 +423,7 @@ suite('hosted billing against DynamoDB Local', () => {
       await moved(a, b, 100_000);
       expect(await rollUp('rollf', [{ person, n: 1_000, account: a }])).toMatchObject({ recorded: 1 });
       expect(await balance(b)).toMatchObject({ availableMicroUsd: 100_000 - 2 * THOUSAND, spentMicroUsd: 2 * THOUSAND });
-      expect(await spend(b)).toMatchObject({ rollf: 2 * THOUSAND });
+      expect(await spend(b)).toMatchObject({ rollf: 2 * THOUSAND, 'rollf#costMicroUsd': THOUSAND, 'rollf#feeMicroUsd': THOUSAND });
       expect(await balance(a)).toMatchObject({ availableMicroUsd: 0, spentMicroUsd: 0 });
       const event = (await events(person)).find((e) => e.appId === 'rollf');
       expect(event).toMatchObject({ costMicroUsd: THOUSAND, feeMicroUsd: THOUSAND, account: b });
@@ -459,7 +460,7 @@ suite('hosted billing against DynamoDB Local', () => {
       const call = (await m.authorize(ask(person))) as Reservation;
       expect(await m.record(call, usage)).toBe('recorded');
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000 - 880, heldMicroUsd: 0, spentMicroUsd: 880 });
-      expect(await spend(account)).toMatchObject({ stacksplit: 880 });
+      expect(await spend(account)).toEqual({ PK: `WALLET#${account}`, SK: 'SPEND#2026-11', stacksplit: 880, 'stacksplit#costMicroUsd': 440, 'stacksplit#feeMicroUsd': 440 });
       expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: 440, feeMicroUsd: 440, account })]);
       expect(await events(person)).toEqual([expect.not.objectContaining({ absorbedMicroUsd: expect.anything() })]);
       // A repeat moves nothing (within 10 minutes the transaction token makes it a silent success).
@@ -486,6 +487,8 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000 - held, heldMicroUsd: 0, spentMicroUsd: held });
       // Charged at the hold: its cost part (the reservation) and its fee apart; only cost is absorbed.
       expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: 440, feeMicroUsd: held / 2, absorbedMicroUsd: 440 - held / 2 })]);
+      // SPEND splits the same way: the absorbed cost is in neither part.
+      expect(await spend(account)).toMatchObject({ stacksplit: held, 'stacksplit#costMicroUsd': held / 2, 'stacksplit#feeMicroUsd': held / 2 });
     });
 
     test("release ('not_billed'): the whole hold back to available, nothing spent, no SPEND", async () => {

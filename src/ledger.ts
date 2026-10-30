@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { adjustmentId, applyAdjustment } from './adjust';
 import { keys, pkExists, pkNotExists, skOf, type TableKey } from './keys';
-import { feeOf, walletKeys } from './wallet';
+import { feeOf, spendParts, walletKeys } from './wallet';
 
 /**
  * One metered call, fully priced. It is plain JSON so it can wait on the retry queue and be
@@ -93,7 +93,7 @@ export function walletChargeOf(paidMicroUsd: number, feeBps: number, capMicroUsd
 /**
  * Hosted: the person's wallet in the usage transaction. A settle or release gives the hold back and
  * spends the charge; rolled-up actions (no hold) spend it only while available covers it. The
- * app's SPEND counter for the month grows by the charge. Nothing for a charge of 0 without a hold.
+ * app's SPEND counter for the month grows by the charge, and its parts by cost and fee. Nothing for a charge of 0 without a hold.
  */
 function walletItems(r: UsageRecord, month: string) {
   const w = r.wallet;
@@ -117,7 +117,16 @@ function walletItems(r: UsageRecord, month: string) {
           }),
     },
   };
-  const spend = { Update: { TableName: w.table, Key: walletKeys.spend(w.account, month), UpdateExpression: 'ADD #app :charged', ExpressionAttributeNames: { '#app': r.appId }, ExpressionAttributeValues: { ':charged': charged } } };
+  const parts = spendParts(r.appId);
+  const spend = {
+    Update: {
+      TableName: w.table,
+      Key: walletKeys.spend(w.account, month),
+      UpdateExpression: 'ADD #app :charged, #cost :cost, #fee :fee',
+      ExpressionAttributeNames: { '#app': r.appId, '#cost': parts.cost, '#fee': parts.fee },
+      ExpressionAttributeValues: { ':charged': charged, ':cost': charged - w.feeMicroUsd, ':fee': w.feeMicroUsd },
+    },
+  };
   return charged ? [balance, spend] : [balance];
 }
 

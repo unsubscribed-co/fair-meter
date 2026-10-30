@@ -261,7 +261,7 @@ describe('hosted billing: { walletTable }', () => {
   test("the app's functions (wallet ADR 0001): read the guard, the link and movedTo; update the counters, its own SPEND counter and the link fields, never movedTo; PutItem on PASS# only", () => {
     expect(walletStatements(hosted().t, 'ApiServiceRoleDefaultPolicy')).toEqual([
       get(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'account', 'email', 'lang', 'movedTo']),
-      update(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'links', 'email', 'lang', 'account']),
+      update(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'stacksplit#costMicroUsd', 'stacksplit#feeMicroUsd', 'links', 'email', 'lang', 'account']),
       { Effect: 'Allow', Action: 'dynamodb:PutItem', Resource: WALLET_ARN, Condition: scoped(['PASS#*'], ['account', 'expiresAt']) },
     ]);
   });
@@ -270,9 +270,9 @@ describe('hosted billing: { walletTable }', () => {
     // A swept hold is absorbed: it only gives the hold back.
     ['MeteringSweeperServiceRoleDefaultPolicy', [update(['WALLET#*'], ['availableMicroUsd', 'heldMicroUsd'])]],
     // A queued settle or release: the hold back, the charge spent and added to SPEND.
-    ['MeteringRetryFnServiceRoleDefaultPolicy', [update(['WALLET#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit'])]],
+    ['MeteringRetryFnServiceRoleDefaultPolicy', [update(['WALLET#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'stacksplit#costMicroUsd', 'stacksplit#feeMicroUsd'])]],
     // Reads available (following movedTo after a move), then charges it (no hold).
-    ['MeteringRollupServiceRoleDefaultPolicy', [get(['WALLET#*'], ['availableMicroUsd', 'movedTo']), update(['WALLET#*'], ['availableMicroUsd', 'spentMicroUsd', 'stacksplit'])]],
+    ['MeteringRollupServiceRoleDefaultPolicy', [get(['WALLET#*'], ['availableMicroUsd', 'movedTo']), update(['WALLET#*'], ['availableMicroUsd', 'spentMicroUsd', 'stacksplit', 'stacksplit#costMicroUsd', 'stacksplit#feeMicroUsd'])]],
   ])('%s: only the wallet counters it moves, on WALLET# only: no LINK#, no PASS#, no labels', (prefix, expected) => {
     expect(walletStatements(hosted().t, prefix)).toEqual(expected);
   });

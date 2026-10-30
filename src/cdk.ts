@@ -21,6 +21,7 @@ import { usdToMicroUsd } from './cost';
 import { EXPORT_COLUMNS, streamFilterPattern } from './export';
 import { hostedBilling, isHttpsUrl, type Actions, type FairMeterConfig } from './fair-meter';
 import { assertAppId, DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
+import { spendParts } from './wallet';
 import { loadFeeFile, loadPriceFiles } from './prices';
 import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
 
@@ -640,18 +641,20 @@ function walletStatements(table: dynamodb.ITable, appId: string) {
     },
   });
   const linked = ['WALLET#*', 'LINK#*'];
+  // The app's own SPEND# counter: the charge and its cost and fee parts.
+  const spend = [appId, ...Object.values(spendParts(appId))];
   const wallet = ['WALLET#*'];
   return {
     app: [
       scoped('GetItem', linked, ['availableMicroUsd', 'account', 'email', 'lang', 'movedTo']),
-      scoped('UpdateItem', linked, ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', appId, 'links', 'email', 'lang', 'account']),
+      scoped('UpdateItem', linked, ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', ...spend, 'links', 'email', 'lang', 'account']),
       scoped('PutItem', ['PASS#*'], ['account', 'expiresAt']),
     ],
     // A swept hold is absorbed: it only gives the hold back.
     sweeper: [scoped('UpdateItem', wallet, ['availableMicroUsd', 'heldMicroUsd'])],
-    retry: [scoped('UpdateItem', wallet, ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', appId])],
+    retry: [scoped('UpdateItem', wallet, ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', ...spend])],
     // Reads movedTo (read only) to charge the end of a moved account's chain.
-    rollup: [scoped('GetItem', wallet, ['availableMicroUsd', 'movedTo']), scoped('UpdateItem', wallet, ['availableMicroUsd', 'spentMicroUsd', appId])],
+    rollup: [scoped('GetItem', wallet, ['availableMicroUsd', 'movedTo']), scoped('UpdateItem', wallet, ['availableMicroUsd', 'spentMicroUsd', ...spend])],
   };
 }
 
