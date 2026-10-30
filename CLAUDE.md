@@ -13,6 +13,7 @@ A metering library that apps embed (public, AGPL-3.0). Apps call `FairMeter.auth
 - `env` is a first-class field on every record. `billing: 'none'` is the default and must not change (its template is pinned); hosted billing is `{ walletTable, topUpUrl }`.
 - Zero behaviour change for existing callers unless a spec lists the change. The old `Meter` surface is Nieto's: its golden tests must stay green.
 - Public repo: no AWS bill figures, profit, account ids or personal data, in code, tests, docs or commit messages.
+- Every release that touches a cloud engine (DynamoDB transactions or IAM conditions, Logs Insights, streams, EventBridge) runs a check against the real services in dev before it ships, as the wallet's `check/check.ts` does: v0.3.0's rollup bug passed every test on a fake Logs Insights and was caught only in dev.
 - The smallest complete design; no speculative options.
 - Never use the middle dot character in any file.
 
