@@ -307,13 +307,16 @@ export class FairMeter {
       console.error('METER_UNAVAILABLE', { ...log, reason: `max ${JSON.stringify(req.max)} does not fit the ${shape} price` });
       return refuse(503, 'metering_unavailable');
     }
+    // Hosted, the daily cap counts charged amounts: the hold plus its fee, the floor plus its fee.
+    const held = charge ? reserved + feeOf(reserved, charge.feeBps) : reserved;
+    const floor = charge ? charge.floor : this.floor;
     // AI holds stop at cap - floor: the floor stays free for actions the rollup hasn't counted yet.
-    const limit = cap - this.floor;
-    if (reserved > limit) {
+    const limit = cap - floor;
+    if (held > limit) {
       console.error('CALL_EXCEEDS_CAP', { ...log, reservedMicroUsd: reserved, dailyCapMicroUsd: cap, ...(this.floor ? { actionFloorMicroUsd: this.floor } : {}) });
       return refuse(429, 'daily_limit_reached', { resetsAt: nextUtcDay(at) }, tier);
     }
-    if (pastFloor(committed + reserved, cap, this.floor)) return this.limitReached(log, at, tier);
+    if (pastFloor(committed + held, cap, floor)) return this.limitReached(log, at, tier);
     if (retryAfterSeconds !== undefined) {
       console.warn('RATE_LIMITED', { ...log, maxCallsPerMinute: this.cfg.maxCallsPerMinute });
       return { ok: false, status: 429, body: { error: 'too_many_requests', retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) }, tier };
@@ -333,8 +336,6 @@ export class FairMeter {
       ...(charge ? { account: charge.account, feeBps: charge.feeBps } : {}),
     };
     const { price: _, ...pending } = hold;
-    // Hosted: the hold plus its fee leaves available, which must still cover the app's floor (with its fee).
-    const walletHold = charge && reserved + feeOf(reserved, charge.feeBps);
     const reserve = new TransactWriteCommand({
       ClientRequestToken: createHash('sha256').update(`${appId}#hold#${callId}`).digest('hex').slice(0, 32),
       TransactItems: [
@@ -346,7 +347,7 @@ export class FairMeter {
             UpdateExpression: 'ADD committedMicroUsd :reserved',
             // Conditions can't add, so the room left for this hold is computed here.
             ConditionExpression: 'attribute_not_exists(committedMicroUsd) OR committedMicroUsd <= :room',
-            ExpressionAttributeValues: { ':reserved': reserved, ':room': limit - reserved },
+            ExpressionAttributeValues: { ':reserved': held, ':room': limit - held },
           },
         },
         ...(charge ? [{
@@ -355,7 +356,8 @@ export class FairMeter {
             Key: walletKeys.balance(charge.account),
             UpdateExpression: 'ADD availableMicroUsd :out, heldMicroUsd :held',
             ConditionExpression: 'availableMicroUsd >= :needed',
-            ExpressionAttributeValues: { ':out': -walletHold!, ':held': walletHold!, ':needed': walletHold! + charge.floor },
+            // The hold plus its fee leaves available, which must still cover the app's floor (with its fee).
+            ExpressionAttributeValues: { ':out': -held, ':held': held, ':needed': held + charge.floor },
           },
         }] : []),
       ],
@@ -365,7 +367,7 @@ export class FairMeter {
       timing.attempts = attempt + 1;
       try {
         await this.ddb.send(reserve);
-        return { ok: true, tier: tierAt(committed + reserved), callId, hold };
+        return { ok: true, tier: tierAt(committed + held), callId, hold };
       } catch (err) {
         const reasons = (err as { CancellationReasons?: { Code?: string }[] }).CancellationReasons ?? [];
         if (reasons[0]?.Code === 'ConditionalCheckFailed') {
@@ -473,21 +475,21 @@ export class FairMeter {
     const sk = tableKeys().sk;
     const day = rows.find((r) => skOf(r) === dayKey[sk]) ?? {};
     const month = rows.find((r) => skOf(r) === monthKey[sk]) ?? {};
-    // What the person paid: list-price cost minus the part the operator absorbed.
-    const spent = (row: Record<string, unknown>) => Number(row.costMicroUsd ?? 0) - Number(row.absorbedMicroUsd ?? 0);
+    // What the person paid: list-price cost minus the part the operator absorbed, plus the fee charged (hosted).
+    const spent = (row: Record<string, unknown>) => Number(row.costMicroUsd ?? 0) - Number(row.absorbedMicroUsd ?? 0) + Number(row.feeMicroUsd ?? 0);
     const committed = Number(day.committedMicroUsd ?? 0);
     const cap = this.cfg.dailyCapMicroUsd;
     return {
       day: {
         spentMicroUsd: spent(day),
-        heldMicroUsd: Math.max(0, committed - Number(day.costMicroUsd ?? 0)),
+        heldMicroUsd: Math.max(0, committed - Number(day.costMicroUsd ?? 0) - Number(day.feeMicroUsd ?? 0)),
         capMicroUsd: cap,
         roomMicroUsd: Math.max(0, cap - committed),
         resetsAt: nextUtcDay(at),
       },
       month: { spentMicroUsd: spent(month), resetsAt: nextUtcMonth(at) },
       tier: dayTier(committed, cap, this.cfg.tiers),
-      readOnly: this.cfg.actions !== undefined && pastFloor(committed, cap, this.floor),
+      readOnly: this.cfg.actions !== undefined && pastFloor(committed, cap, this.capFloor(at)),
       ...(wallet ? { wallet: { availableMicroUsd: Number(wallet.Item?.availableMicroUsd ?? 0) } } : {}),
     };
   }
@@ -548,7 +550,7 @@ export class FairMeter {
       ]);
       const committed = Number(Item?.committedMicroUsd ?? 0);
       const tier = dayTier(committed, this.cfg.dailyCapMicroUsd, this.cfg.tiers);
-      if (pastFloor(committed, this.cfg.dailyCapMicroUsd, this.floor)) return this.limitReached(log, at, tier);
+      if (pastFloor(committed, this.cfg.dailyCapMicroUsd, charge ? charge.floor : this.floor)) return this.limitReached(log, at, tier);
       if (charge && !(Number(wallet!.Item?.availableMicroUsd) >= charge.floor)) return await this.balanceTooLow(log, charge, tier);
       return { ok: true };
     } catch (err) {
@@ -560,6 +562,12 @@ export class FairMeter {
   /** The room under the daily cap kept for actions not rolled up yet; 0 without actions. */
   private get floor(): number {
     return this.cfg.actions ? this.cfg.actionFloorMicroUsd! : 0;
+  }
+
+  /** The floor as the daily cap counts it: hosted, with its fee (charged amounts). */
+  private capFloor(at: Date): number {
+    const billing = this.cfg.billing;
+    return typeof billing === 'object' ? this.floor + feeOf(this.floor, feeAt(at, billing.fee).feeBps) : this.floor;
   }
 
   /** This instance's per-person action counts for the current UTC minute. */
@@ -697,8 +705,7 @@ export class FairMeter {
       console.error(link ? 'LINK_CONFLICT' : 'ACCOUNT_NOT_LINKED', { appId: this.cfg.appId, person });
       return refuse(403, link ? 'link_conflict' : 'account_not_linked');
     }
-    const { feeBps } = feeAt(at, billing.fee);
-    return { table: billing.walletTable, account: link.account, feeBps, floor: this.floor + feeOf(this.floor, feeBps) };
+    return { table: billing.walletTable, account: link.account, feeBps: feeAt(at, billing.fee).feeBps, floor: this.capFloor(at) };
   }
 
   /** A debit the wallet's available can't cover; a missing BALANCE row is refused the same way and alarms. */

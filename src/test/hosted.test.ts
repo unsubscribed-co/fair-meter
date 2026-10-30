@@ -331,6 +331,8 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(event).toMatchObject({ costMicroUsd: THOUSAND, feeMicroUsd: THOUSAND, account });
       expect(event).not.toHaveProperty('absorbedMicroUsd');
       expect(console.error).not.toHaveBeenCalledWith('FLOOR_OVERRUN', expect.anything());
+      // The daily cap and usage count the charged amount, cost plus fee.
+      expect((await meter({ appId: 'rolla' }).usage(person)).day).toMatchObject({ spentMicroUsd: 2 * THOUSAND, roomMicroUsd: 500_000 - 2 * THOUSAND });
 
       // The same window again (an overlapping run): a duplicate, the wallet untouched.
       lines([{ person, n: 1_000, account }]);
@@ -382,6 +384,14 @@ suite('hosted billing against DynamoDB Local', () => {
       expect((await events(person)).find((e) => e.appId === 'rollc')).toMatchObject({ feeMicroUsd: 5_000, absorbedMicroUsd: THOUSAND - 5_000 });
     });
 
+    test('canWrite: the floor is kept in charged amounts too: committed above cap minus floor plus its fee is read-only', async () => {
+      const { m, person } = await linked('readonly', 100_000, { ...ACTIONS, dailyCapMicroUsd: 10_000 });
+      // 8,001 committed: under cap - floor (9,000), above cap - floor - its fee (8,000).
+      await ddb.send(new UpdateCommand({ TableName: LEDGER, Key: { PK: `USER#${person}`, SK: 'DAILY#stacksplit#2026-11-03' }, UpdateExpression: 'SET committedMicroUsd = :c', ExpressionAttributeValues: { ':c': 8_001 } }));
+      expect(await m.canWrite(person)).toMatchObject({ ok: false, body: { error: 'daily_limit_reached' } });
+      expect(await m.usage(person)).toMatchObject({ readOnly: true });
+    });
+
     test('canWrite: available at or above the floor plus its fee; below it balance_too_low; unlinked account_not_linked', async () => {
       const { m, person, account } = await linked('write', 2_000, ACTIONS);
       expect(await m.canWrite(person)).toEqual({ ok: true });
@@ -396,7 +406,7 @@ suite('hosted billing against DynamoDB Local', () => {
     test("usage(person) adds the wallet's available; an unlinked person's has no wallet", async () => {
       const { m, person } = await linked('usage', 50_000, ACTIONS);
       await m.authorize(ask(person));
-      expect(await m.usage(person)).toMatchObject({ wallet: { availableMicroUsd: 50_000 - HELD }, day: { heldMicroUsd: RESERVED } });
+      expect(await m.usage(person)).toMatchObject({ wallet: { availableMicroUsd: 50_000 - HELD }, day: { heldMicroUsd: HELD } });
       expect(await m.usage(who('nousage'))).not.toHaveProperty('wallet');
     });
 

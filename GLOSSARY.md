@@ -50,7 +50,7 @@ _Avoid_: buffer, reserve
 ## Limits
 
 **Committed**:
-A person's settled cost today plus their open holds (`committedMicroUsd`): what the daily cap is checked against.
+A person's settled cost today plus their open holds (`committedMicroUsd`): what the daily cap is checked against. Under hosted billing, in charged amounts: each with its fee.
 
 **Room**:
 The daily cap minus committed: what the person may still spend today.

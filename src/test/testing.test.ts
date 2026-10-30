@@ -208,6 +208,22 @@ describe.each([
     expect(await wallet(m, 'settle')).toEqual({ availableMicroUsd: 100_000 - 880 });
   });
 
+  it('the daily cap counts charged amounts: the hold plus its fee is held, cost plus fee is spent; a cap with room for one hold plus fee refuses a second', async () => {
+    const m = await linked('cap', 100_000, { dailyCapMicroUsd: HELD + 100 });
+    const call = (await m.authorize(ask(who('cap')))) as Reservation;
+    expect(call.ok).toBe(true);
+    expect((await m.usage(who('cap'))).day).toMatchObject({ spentMicroUsd: 0, heldMicroUsd: HELD, roomMicroUsd: 100 });
+    expect(await m.authorize(ask(who('cap')))).toMatchObject({ ok: false, body: { error: 'daily_limit_reached' } });
+    expect(await m.record(call, usage)).toBe('recorded');
+    expect(await m.usage(who('cap'))).toMatchObject({ day: { spentMicroUsd: 880, heldMicroUsd: 0, roomMicroUsd: HELD + 100 - 880 }, month: { spentMicroUsd: 880 } });
+  });
+
+  it('a release gives the hold plus its fee back to the day', async () => {
+    const m = await linked('capback', 100_000, { dailyCapMicroUsd: HELD + 100 });
+    expect(await m.record((await m.authorize(ask(who('capback')))) as Reservation, 'not_billed')).toBe('recorded');
+    expect((await m.usage(who('capback'))).day).toMatchObject({ spentMicroUsd: 0, heldMicroUsd: 0, roomMicroUsd: HELD + 100 });
+  });
+
   it("release: the whole hold comes back", async () => {
     const m = await linked('release', 100_000);
     expect(await m.record((await m.authorize(ask(who('release')))) as Reservation, 'not_billed')).toBe('recorded');
@@ -297,6 +313,14 @@ describe('FakeFairMeter: what only the double does', () => {
     expect((await m.usage('ana@x.co')).wallet).toEqual({ availableMicroUsd: 0 });
     // The 400 charged is 200 of cost and 200 of fee: only cost is absorbed.
     expect(console.error).toHaveBeenCalledWith('FLOOR_OVERRUN', expect.objectContaining({ chargedMicroUsd: 400, absorbedMicroUsd: 100 }));
+  });
+
+  test('hosted rollUp: cost plus fee counts toward the daily cap and is what usage shows spent', async () => {
+    const m = new FakeFairMeter({ hosted: true, now: () => AT });
+    m.fund('acc', 1_000);
+    await m.link('ana@x.co', 'acc', { email: 'ana@x.co', lang: 'es' });
+    m.rollUp('ana@x.co', 300);
+    expect(await m.usage('ana@x.co')).toMatchObject({ day: { spentMicroUsd: 600, roomMicroUsd: 500_000 - 600 }, month: { spentMicroUsd: 600 } });
   });
 
   test('hosted rollUp, a full overrun (nothing available): the cost absorbed, never the fee; spent stays at zero', async () => {

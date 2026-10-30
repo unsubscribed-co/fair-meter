@@ -158,6 +158,9 @@ export function usageTransaction(table: string, r: UsageRecord) {
   const month = r.requestTime.slice(0, 7);
   const day = r.requestTime.slice(0, 10);
   const held = r.reservedMicroUsd;
+  // Hosted, the daily cap counts charged amounts: the hold plus its fee, cost plus the fee charged.
+  const fee = r.wallet?.feeMicroUsd ?? 0;
+  const capHold = r.wallet?.heldMicroUsd ?? held;
   const pending = held === undefined ? [] : [{ Delete: { TableName: table, Key: keys.pending(r.appId, r.requestId), ConditionExpression: pkExists() } }];
   if (r.release) {
     if (held === undefined) throw new Error(`A release needs reservedMicroUsd: ${r.requestId}`);
@@ -165,7 +168,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
       ClientRequestToken: clientRequestToken(r.appId, r.requestId),
       TransactItems: [
         ...pending,
-        { Update: { TableName: table, Key: keys.userDay(r.sub, r.appId, day), UpdateExpression: 'ADD committedMicroUsd :held', ExpressionAttributeValues: { ':held': -held } } },
+        { Update: { TableName: table, Key: keys.userDay(r.sub, r.appId, day), UpdateExpression: 'ADD committedMicroUsd :held', ExpressionAttributeValues: { ':held': -capHold! } } },
         ...walletItems(r, month),
       ],
     });
@@ -181,9 +184,11 @@ export function usageTransaction(table: string, r: UsageRecord) {
   const counter = (key: TableKey) => ({ Update: { TableName: table, Key: key, ...counters } });
   // Only the person's day and month carry what the operator absorbed.
   const absorbed = absorbedOf(r);
-  const personal = absorbed
-    ? { UpdateExpression: `${counters.UpdateExpression}, absorbedMicroUsd :absorbed`, ExpressionAttributeValues: { ...counters.ExpressionAttributeValues, ':absorbed': absorbed } }
-    : counters;
+  // ...and the fee charged, hosted.
+  const personal = {
+    UpdateExpression: `${counters.UpdateExpression}${absorbed ? ', absorbedMicroUsd :absorbed' : ''}${fee ? ', feeMicroUsd :fee' : ''}`,
+    ExpressionAttributeValues: { ...counters.ExpressionAttributeValues, ...(absorbed ? { ':absorbed': absorbed } : {}), ...(fee ? { ':fee': fee } : {}) },
+  };
   if (r.householdId === undefined && (r.deductCredit || r.householdMonthMarks)) throw new Error(`No household to charge: ${r.requestId}`);
   const provider = recordProvider(r);
   const freeTier = r.providerMonth;
@@ -247,7 +252,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
       held === undefined
         ? r.kind === 'actions'
           // Rolled-up actions count toward the cap like a settled hold: the write check reads committed.
-          ? { Update: { TableName: table, Key: keys.userDay(r.sub, r.appId, day), UpdateExpression: `${personal.UpdateExpression}, committedMicroUsd :cost`, ExpressionAttributeValues: personal.ExpressionAttributeValues } }
+          ? { Update: { TableName: table, Key: keys.userDay(r.sub, r.appId, day), UpdateExpression: `${personal.UpdateExpression}, committedMicroUsd :committed`, ExpressionAttributeValues: { ...personal.ExpressionAttributeValues, ':committed': r.costMicroUsd + fee } } }
           : counter(keys.userDay(r.sub, r.appId, day))
         : {
             Update: {
@@ -255,7 +260,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
               Key: keys.userDay(r.sub, r.appId, day),
               // The hold becomes the actual cost: committed (the cap's attribute) moves by the difference.
               UpdateExpression: `${personal.UpdateExpression}, committedMicroUsd :held`,
-              ExpressionAttributeValues: { ...personal.ExpressionAttributeValues, ':held': r.costMicroUsd - held },
+              ExpressionAttributeValues: { ...personal.ExpressionAttributeValues, ':held': r.costMicroUsd + fee - capHold! },
             },
           },
       ...householdMonth,

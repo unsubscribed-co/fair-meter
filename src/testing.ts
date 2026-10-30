@@ -29,7 +29,7 @@ export interface FakeFairMeterOptions {
   hosted?: boolean;
 }
 
-type Row = { committed: number; cost: number; absorbed: number };
+type Row = { committed: number; cost: number; absorbed: number; fee: number };
 
 export class FakeFairMeter implements FairMeterApi {
   /** Every public call, in order, with its arguments. */
@@ -75,19 +75,23 @@ export class FakeFairMeter implements FairMeterApi {
   rollUp(person: string, costMicroUsd: number): void {
     const at = this.now();
     let absorbed = 0;
+    let fee = 0;
     const account = this.links.get(person);
     if (this.options.hosted && account) {
       const { feeMicroUsd, chargedMicroUsd } = walletChargeOf(costMicroUsd, feeAt(at).feeBps, this.available.get(account) ?? 0);
       this.available.set(account, (this.available.get(account) ?? 0) - chargedMicroUsd);
       // Only cost is absorbed, never the fee.
       absorbed = costMicroUsd + feeMicroUsd - chargedMicroUsd;
+      fee = feeMicroUsd;
       if (absorbed) console.error('FLOOR_OVERRUN', { person, account, chargedMicroUsd, absorbedMicroUsd: absorbed });
     }
     for (const row of [this.row(person, utcDay(at)), this.row(person, utcMonth(at))]) {
       row.cost += costMicroUsd;
       row.absorbed += absorbed;
+      row.fee += fee;
     }
-    this.row(person, utcDay(at)).committed += costMicroUsd;
+    // Hosted, the daily cap counts charged amounts (cost plus the fee charged), as in FairMeter.
+    this.row(person, utcDay(at)).committed += costMicroUsd + fee;
   }
 
   async link(person: string, sub: string, labels: { email: string; lang: string }): Promise<LinkOutcome> {
@@ -121,15 +125,16 @@ export class FakeFairMeter implements FairMeterApi {
     const price = { provider: file.provider, ...version };
     const reserved = reserveCost(price, req.max, at);
     if (reserved === undefined) return refusal('metering_unavailable', at);
-    // AI holds stop at cap - floor, as in FairMeter.
-    if (pastFloor(day.committed + reserved, this.cap, this.floor)) return refusal('daily_limit_reached', at, this.tier(day.committed));
     const account = this.links.get(req.person);
     const feeBps = feeAt(at).feeBps;
+    // Hosted, the daily cap counts charged amounts: the hold plus its fee, the floor plus its fee.
+    const held = account ? reserved + feeOf(reserved, feeBps) : reserved;
+    // AI holds stop at cap - floor, as in FairMeter.
+    if (pastFloor(day.committed + held, this.cap, this.capFloor(at))) return refusal('daily_limit_reached', at, this.tier(day.committed));
     if (account) {
       // The hold plus its fee must leave the floor (with its fee) in available, as in FairMeter.
-      const held = reserved + feeOf(reserved, feeBps);
       const left = this.available.get(account);
-      if (left === undefined || left < held + this.walletFloor(at)) return refusal('balance_too_low', at, this.tier(day.committed));
+      if (left === undefined || left < held + this.capFloor(at)) return refusal('balance_too_low', at, this.tier(day.committed));
       this.available.set(account, left - held);
     }
     const callId = randomUUID();
@@ -137,7 +142,7 @@ export class FakeFairMeter implements FairMeterApi {
       person: req.person, at: at.toISOString(), sku: req.sku, provider: file.provider, pricingVersion: `${req.sku}@${version.validFrom}`,
       price, max: req.max, reservedMicroUsd: reserved, paidBy: req.paidBy ?? 'paid', ...(account ? { account, feeBps } : {}),
     };
-    day.committed += reserved;
+    day.committed += held;
     this.open.add(callId);
     return { ok: true, tier: this.tier(day.committed), callId, hold };
   }
@@ -164,14 +169,17 @@ export class FakeFairMeter implements FairMeterApi {
     // The hold back, the charge spent, on the hold's own account.
     if (w) this.available.set(w.account, (this.available.get(w.account) ?? 0) + w.heldMicroUsd! - (r.release ? 0 : w.chargedMicroUsd));
     const day = this.row(r.sub, r.requestTime.slice(0, 10));
+    const held = w?.heldMicroUsd ?? r.reservedMicroUsd!;
     if (r.release) {
-      day.committed -= r.reservedMicroUsd!;
+      day.committed -= held;
       return 'recorded';
     }
-    day.committed += r.costMicroUsd - r.reservedMicroUsd!;
+    const fee = w?.feeMicroUsd ?? 0;
+    day.committed += r.costMicroUsd + fee - held;
     for (const row of [day, this.row(r.sub, r.requestTime.slice(0, 7))]) {
       row.cost += r.costMicroUsd;
       row.absorbed += absorbedOf(r);
+      row.fee += fee;
     }
     return 'recorded';
   }
@@ -183,15 +191,15 @@ export class FakeFairMeter implements FairMeterApi {
     const month = this.row(person, utcMonth(at));
     return {
       day: {
-        spentMicroUsd: day.cost - day.absorbed,
-        heldMicroUsd: Math.max(0, day.committed - day.cost),
+        spentMicroUsd: day.cost - day.absorbed + day.fee,
+        heldMicroUsd: Math.max(0, day.committed - day.cost - day.fee),
         capMicroUsd: this.cap,
         roomMicroUsd: Math.max(0, this.cap - day.committed),
         resetsAt: nextUtcDay(at),
       },
-      month: { spentMicroUsd: month.cost - month.absorbed, resetsAt: nextUtcMonth(at) },
+      month: { spentMicroUsd: month.cost - month.absorbed + month.fee, resetsAt: nextUtcMonth(at) },
       tier: this.tier(day.committed),
-      readOnly: this.options.actions !== undefined && pastFloor(day.committed, this.cap, this.floor),
+      readOnly: this.options.actions !== undefined && pastFloor(day.committed, this.cap, this.capFloor(at)),
       ...(this.links.get(person) ? { wallet: { availableMicroUsd: this.available.get(this.links.get(person)!) ?? 0 } } : {}),
     };
   }
@@ -220,9 +228,9 @@ export class FakeFairMeter implements FairMeterApi {
     if ((this.actionsThisMinute().get(person) ?? 0) + n > a.perPersonPerMinute) return refusal('too_many_requests', at);
     const unlinked = this.unlinked(person, at);
     if (unlinked) return unlinked;
-    if (pastFloor(committed, this.cap, this.floor)) return refusal('daily_limit_reached', at, this.tier(committed));
+    if (pastFloor(committed, this.cap, this.capFloor(at))) return refusal('daily_limit_reached', at, this.tier(committed));
     const account = this.links.get(person);
-    if (account && !((this.available.get(account) ?? -1) >= this.walletFloor(at))) return refusal('balance_too_low', at, this.tier(committed));
+    if (account && !((this.available.get(account) ?? -1) >= this.capFloor(at))) return refusal('balance_too_low', at, this.tier(committed));
     return { ok: true };
   }
 
@@ -232,9 +240,9 @@ export class FakeFairMeter implements FairMeterApi {
     return refusal(this.links.has(person) ? 'link_conflict' : 'account_not_linked', at);
   }
 
-  /** Hosted: the floor plus its fee, what AI holds must leave in available. */
-  private walletFloor(at: Date): number {
-    return this.floor + feeOf(this.floor, feeAt(at).feeBps);
+  /** Hosted: the floor plus its fee, what AI holds must leave in available and under the daily cap (charged amounts). */
+  private capFloor(at: Date): number {
+    return this.options.hosted ? this.floor + feeOf(this.floor, feeAt(at).feeBps) : this.floor;
   }
 
   private takeForced(at: Date, tier: Refusal['tier']): Refusal | undefined {
@@ -250,7 +258,7 @@ export class FakeFairMeter implements FairMeterApi {
   private row(person: string, period: string): Row {
     const key = `${person}#${period}`;
     let row = this.rows.get(key);
-    if (!row) this.rows.set(key, (row = { committed: 0, cost: 0, absorbed: 0 }));
+    if (!row) this.rows.set(key, (row = { committed: 0, cost: 0, absorbed: 0, fee: 0 }));
     return row;
   }
 
