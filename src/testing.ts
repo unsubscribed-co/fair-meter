@@ -6,7 +6,7 @@ import { nextUtcDay, nextUtcMonth, secondsToNextUtcMinute, utcDay, utcMinute, ut
 import { absorbedOf, walletChargeOf } from './ledger';
 import { feeAt, loadPriceFiles, type PriceFile } from './prices';
 import { reserveCost, versionStartedBy } from './pricing';
-import { feeOf, TOP_UP_URL } from './wallet';
+import { feeOf } from './wallet';
 
 /*
  * fair-meter/testing: FairMeter in memory, for an app's own tests (no DynamoDB, no SDK mocks).
@@ -25,8 +25,8 @@ export interface FakeFairMeterOptions {
   /** Default: the price files fair-meter ships in prices/. */
   prices?: PriceFile[];
   now?: () => Date;
-  /** Hosted billing: wallets in memory (`fund`), charged cost plus the fee of prices/fee.json; people `link` first. */
-  hosted?: boolean;
+  /** Hosted billing: wallets in memory (`fund`), charged cost plus the fee of prices/fee.json; people `link` first. `topUpUrl` as in FairMeter's billing. */
+  hosted?: { topUpUrl: string };
 }
 
 type Row = { committed: number; cost: number; absorbed: number; fee: number };
@@ -134,7 +134,7 @@ export class FakeFairMeter implements FairMeterApi {
     if (account) {
       // The hold plus its fee must leave the floor (with its fee) in available, as in FairMeter.
       const left = this.available.get(account);
-      if (left === undefined || left < held + this.capFloor(at)) return refusal('balance_too_low', at, this.tier(day.committed));
+      if (left === undefined || left < held + this.capFloor(at)) return refusal('balance_too_low', at, this.tier(day.committed), this.options.hosted?.topUpUrl);
       this.available.set(account, left - held);
     }
     const callId = randomUUID();
@@ -151,7 +151,7 @@ export class FakeFairMeter implements FairMeterApi {
     this.calls.push({ method: 'record', args: [call, usage] });
     let r;
     try {
-      r = settlementRecord({ appId: 'fake', env: 'test', billing: this.options.hosted ? { walletTable: 'fake' } : 'none' }, call, usage);
+      r = settlementRecord({ appId: 'fake', env: 'test', billing: this.options.hosted ? { walletTable: 'fake', topUpUrl: this.options.hosted.topUpUrl } : 'none' }, call, usage);
     } catch (err) {
       console.error('USAGE_RECORD_FAILED', { callId: call?.callId, call, usage, err });
       return 'failed';
@@ -233,7 +233,7 @@ export class FakeFairMeter implements FairMeterApi {
     if (unlinked) return unlinked;
     if (pastFloor(committed, this.cap, this.capFloor(at))) return refusal('daily_limit_reached', at, this.tier(committed));
     const account = this.links.get(person);
-    if (account && !((this.available.get(account) ?? -1) >= this.capFloor(at))) return refusal('balance_too_low', at, this.tier(committed));
+    if (account && !((this.available.get(account) ?? -1) >= this.capFloor(at))) return refusal('balance_too_low', at, this.tier(committed), this.options.hosted?.topUpUrl);
     return { ok: true };
   }
 
@@ -251,7 +251,7 @@ export class FakeFairMeter implements FairMeterApi {
   private takeForced(at: Date, tier: Refusal['tier']): Refusal | undefined {
     const code = this.forced;
     this.forced = undefined;
-    return code && refusal(code, at, tier);
+    return code && refusal(code, at, tier, this.options.hosted?.topUpUrl);
   }
 
   private tier(committed: number) {
@@ -273,11 +273,11 @@ export class FakeFairMeter implements FairMeterApi {
 }
 
 /** The refusal FairMeter returns for this code; the tier only where FairMeter knows it. */
-function refusal(error: RefusalCode, at: Date, tier?: Refusal['tier']): Refusal {
+function refusal(error: RefusalCode, at: Date, tier?: Refusal['tier'], topUpUrl?: string): Refusal {
   const retryAfterSeconds = secondsToNextUtcMinute(at);
   const known = tier && !['pricing_not_configured', 'metering_unavailable', 'account_not_linked', 'link_conflict'].includes(error) ? { tier } : {};
   if (error === 'too_many_requests') return { ok: false, status: 429, body: { error, retryAfterSeconds }, headers: { 'Retry-After': String(retryAfterSeconds) }, ...known };
-  if (error === 'balance_too_low') return { ok: false, status: 402, body: { error, topUpUrl: TOP_UP_URL }, headers: {}, ...known };
+  if (error === 'balance_too_low') return { ok: false, status: 402, body: { error, ...(topUpUrl ? { topUpUrl } : {}) }, headers: {}, ...known };
   if (error === 'account_not_linked' || error === 'link_conflict') return { ok: false, status: 403, body: { error }, headers: {} };
   const resetsAt = error === 'daily_limit_reached' || error === 'service_paused' ? { resetsAt: nextUtcDay(at) } : {};
   return { ok: false, status: error === 'daily_limit_reached' ? 429 : 503, body: { error, ...resetsAt }, headers: {}, ...known };

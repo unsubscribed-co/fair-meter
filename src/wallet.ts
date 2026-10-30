@@ -40,9 +40,6 @@ export interface WalletPass {
 
 export const PASS_TTL_SECONDS = 120;
 
-/** Where a person tops up: the hint on `balance_too_low`. */
-export const TOP_UP_URL = 'https://pay.unsubscribed.dev';
-
 export const walletKeys = {
   balance: (account: string) => ({ PK: `WALLET#${account}`, SK: 'BALANCE' }),
   spend: (account: string, month: string) => ({ PK: `WALLET#${account}`, SK: `SPEND#${month}` }),

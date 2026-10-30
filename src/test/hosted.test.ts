@@ -29,7 +29,7 @@ const ddb = DynamoDBDocumentClient.from(raw);
 const FEE = { versions: [{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000 }] };
 const config: FairMeterConfig = {
   appId: 'stacksplit', env: 'prod', tableName: LEDGER, retryQueueUrl: 'https://sqs/never-used',
-  dailyCapMicroUsd: 500_000, appDailyCapMicroUsd: 100_000_000, billing: { walletTable: WALLET, fee: FEE },
+  dailyCapMicroUsd: 500_000, appDailyCapMicroUsd: 100_000_000, billing: { walletTable: WALLET, fee: FEE, topUpUrl: 'https://pay.dev.example' },
 };
 const AT = new Date('2026-11-03T14:05:09.120Z');
 const meter = (cfg: Partial<FairMeterConfig> = {}, now = () => AT) => new FairMeter({ ...config, ...cfg }, { ddb, sqs: new SQSClient({ region: 'us-east-1' }), now });
@@ -270,7 +270,7 @@ suite('hosted billing against DynamoDB Local', () => {
     test('refused balance_too_low (402, with where to top up) below hold plus fee: nothing held, no PENDING', async () => {
       const { m, person, account } = await linked('low', HELD - 1);
       expect(await m.authorize(ask(person))).toEqual({
-        ok: false, status: 402, body: { error: 'balance_too_low', topUpUrl: 'https://pay.unsubscribed.dev' }, headers: {}, tier: 'normal',
+        ok: false, status: 402, body: { error: 'balance_too_low', topUpUrl: 'https://pay.dev.example' }, headers: {}, tier: 'normal',
       });
       expect(await balance(account)).toMatchObject({ availableMicroUsd: HELD - 1, heldMicroUsd: 0 });
       expect(console.warn).toHaveBeenCalledWith('BALANCE_TOO_LOW', expect.objectContaining({ account }));
@@ -396,7 +396,7 @@ suite('hosted billing against DynamoDB Local', () => {
       const { m, person, account } = await linked('write', 2_000, ACTIONS);
       expect(await m.canWrite(person)).toEqual({ ok: true });
       await fund(account, 1_999);
-      expect(await m.canWrite(person)).toEqual({ ok: false, status: 402, body: { error: 'balance_too_low', topUpUrl: 'https://pay.unsubscribed.dev' }, headers: {}, tier: 'normal' });
+      expect(await m.canWrite(person)).toEqual({ ok: false, status: 402, body: { error: 'balance_too_low', topUpUrl: 'https://pay.dev.example' }, headers: {}, tier: 'normal' });
       // A top-up gives writes back at once.
       await fund(account, 2_000);
       expect(await m.canWrite(person)).toEqual({ ok: true });

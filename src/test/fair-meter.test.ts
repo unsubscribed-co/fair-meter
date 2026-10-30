@@ -533,6 +533,8 @@ describe('actions', () => {
 describe('T19: config, refused at startup', () => {
   test.each([
     ["billing 'hosted' (no wallet yet)", { billing: 'hosted' as const }],
+    ['hosted billing without the top-up URL of its stage', { billing: { walletTable: 'wallet' } as never }],
+    ['hosted billing with a top-up URL that is not https', { billing: { walletTable: 'wallet', topUpUrl: 'http://pay.dev.example' } }],
     ['a bad appId', { appId: 'Stack Split' }],
     ['a non-integer cap', { dailyCapMicroUsd: 0.5 }],
     ['a zero app cap', { appDailyCapMicroUsd: 0 }],

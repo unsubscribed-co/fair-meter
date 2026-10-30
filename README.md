@@ -203,7 +203,8 @@ The wallet (Unsubscribed!'s, one prepaid USD balance per person shared by every 
 
 ```ts
 const walletTable = dynamodb.Table.fromTableArn(this, 'Wallet', walletTableArn); // e.g. from SSM /wallet/table-arn
-const metering = new Metering(this, 'Metering', { appId: 'stacksplit', env: 'prod', dailyCapUsd: '0.50', appDailyCapUsd: '5', billing: { walletTable } });
+// topUpUrl: this stage's top-up page (https), the hint on balance_too_low; its one home is this prop.
+const metering = new Metering(this, 'Metering', { appId: 'stacksplit', env: 'prod', dailyCapUsd: '0.50', appDailyCapUsd: '5', billing: { walletTable, topUpUrl } });
 ```
 
 Three calls are new:
@@ -236,7 +237,7 @@ meter.rollUp(person, 7_001); // what the rollup charges: the person is now read-
 expect(meter.calls).toContainEqual({ method: 'action', args: [{ person, sku: 'myapp-add' }] });
 ```
 
-Options: `dailyCapMicroUsd` (default 500,000, $0.50), `actions` and `actionFloorMicroUsd` (as `Metering` writes them), `tiers`, `prices` (default: the price files in this package's `prices/`), `now` and `hosted` (wallets in memory: `fund(account, availableMicroUsd)`, then `link`; holds, settles, `rollUp`, `canWrite` and `usage` move and read them as `FairMeter` does, with the fee of `prices/fee.json`). It holds and settles like `FairMeter`, with the same outcomes, refusal bodies and `usage`: a shared test runs the same scenarios against both, `FairMeter` on DynamoDB Local. Where they differ: the fake answers a repeat of a settle with `duplicate` and another payload with `conflict` at once, while `FairMeter` answers those within DynamoDB's 10-minute idempotency window with `recorded` or `deferred`; it has no sweeper, retry queue, app or all-apps breaker or `maxCallsPerMinute` brake (use `refuseNext` for those refusals); and it logs only `ACTION_UNKNOWN`, `RECORD_CONFLICT` and the settle's alarms (`USAGE_MISSING`, `RESERVATION_EXCEEDED`), so `action` writes no line.
+Options: `dailyCapMicroUsd` (default 500,000, $0.50), `actions` and `actionFloorMicroUsd` (as `Metering` writes them), `tiers`, `prices` (default: the price files in this package's `prices/`), `now` and `hosted: { topUpUrl }` (wallets in memory: `fund(account, availableMicroUsd)`, then `link`; holds, settles, `rollUp`, `canWrite` and `usage` move and read them as `FairMeter` does, with the fee of `prices/fee.json`). It holds and settles like `FairMeter`, with the same outcomes, refusal bodies and `usage`: a shared test runs the same scenarios against both, `FairMeter` on DynamoDB Local. Where they differ: the fake answers a repeat of a settle with `duplicate` and another payload with `conflict` at once, while `FairMeter` answers those within DynamoDB's 10-minute idempotency window with `recorded` or `deferred`; it has no sweeper, retry queue, app or all-apps breaker or `maxCallsPerMinute` brake (use `refuseNext` for those refusals); and it logs only `ACTION_UNKNOWN`, `RECORD_CONFLICT` and the settle's alarms (`USAGE_MISSING`, `RESERVATION_EXCEEDED`), so `action` writes no line.
 
 ### Known limits (v0.4.0)
 

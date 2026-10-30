@@ -60,7 +60,7 @@ interface HostedSubject {
 }
 const realHosted: HostedSubject = {
   meter: (limits) => new FairMeter(
-    { appId: 'stacksplit', env: 'prod', tableName: TABLE, retryQueueUrl: 'https://sqs/never-used', appDailyCapMicroUsd: 100_000_000, billing: { walletTable: WALLET }, ...limits },
+    { appId: 'stacksplit', env: 'prod', tableName: TABLE, retryQueueUrl: 'https://sqs/never-used', appDailyCapMicroUsd: 100_000_000, billing: { walletTable: WALLET, topUpUrl: 'https://pay.dev.example' }, ...limits },
     { ddb, sqs: new SQSClient({ region: 'us-east-1' }), now: () => AT },
   ),
   fund: async (_, account, availableMicroUsd) => {
@@ -68,7 +68,7 @@ const realHosted: HostedSubject = {
   },
 };
 const fakeHosted: HostedSubject = {
-  meter: (limits) => new FakeFairMeter({ ...limits, hosted: true, now: () => AT }),
+  meter: (limits) => new FakeFairMeter({ ...limits, hosted: { topUpUrl: 'https://pay.dev.example' }, now: () => AT }),
   fund: async (m, account, availableMicroUsd) => (m as FakeFairMeter).fund(account, availableMicroUsd),
 };
 
@@ -241,7 +241,7 @@ describe.each([
 
   it('balance_too_low below the hold plus its fee (402, where to top up); a top-up lets it through', async () => {
     const m = await linked('low', HELD - 1);
-    expect(await m.authorize(ask(who('low')))).toEqual({ ok: false, status: 402, body: { error: 'balance_too_low', topUpUrl: 'https://pay.unsubscribed.dev' }, headers: {}, tier: 'normal' });
+    expect(await m.authorize(ask(who('low')))).toEqual({ ok: false, status: 402, body: { error: 'balance_too_low', topUpUrl: 'https://pay.dev.example' }, headers: {}, tier: 'normal' });
     await subject.fund(m, sub('low'), HELD);
     expect(await m.authorize(ask(who('low')))).toMatchObject({ ok: true });
     expect(await wallet(m, 'low')).toEqual({ availableMicroUsd: 0 });
@@ -260,7 +260,7 @@ describe.each([
     const m = await linked('write', 6_000, { dailyCapMicroUsd: CAP, actions: ACTIONS, actionFloorMicroUsd: 3_000 });
     expect(await m.canWrite(who('write'))).toEqual({ ok: true });
     await subject.fund(m, sub('write'), 5_999);
-    expect(await m.canWrite(who('write'))).toEqual({ ok: false, status: 402, body: { error: 'balance_too_low', topUpUrl: 'https://pay.unsubscribed.dev' }, headers: {}, tier: 'normal' });
+    expect(await m.canWrite(who('write'))).toEqual({ ok: false, status: 402, body: { error: 'balance_too_low', topUpUrl: 'https://pay.dev.example' }, headers: {}, tier: 'normal' });
   });
 
   it('walletPass: a fresh single-use value per call', async () => {
@@ -313,7 +313,7 @@ describe('FakeFairMeter: what only the double does', () => {
   });
 
   test('hosted rollUp: charges cost plus fee up to what is available, never below zero', async () => {
-    const m = new FakeFairMeter({ hosted: true, now: () => AT });
+    const m = new FakeFairMeter({ hosted: { topUpUrl: 'https://pay.dev.example' }, now: () => AT });
     m.fund('acc', 1_000);
     await m.link('ana@x.co', 'acc', { email: 'ana@x.co', lang: 'es' });
     m.rollUp('ana@x.co', 300);
@@ -325,7 +325,7 @@ describe('FakeFairMeter: what only the double does', () => {
   });
 
   test('hosted rollUp: cost plus fee counts toward the daily cap and is what usage shows spent', async () => {
-    const m = new FakeFairMeter({ hosted: true, now: () => AT });
+    const m = new FakeFairMeter({ hosted: { topUpUrl: 'https://pay.dev.example' }, now: () => AT });
     m.fund('acc', 1_000);
     await m.link('ana@x.co', 'acc', { email: 'ana@x.co', lang: 'es' });
     m.rollUp('ana@x.co', 300);
@@ -333,7 +333,7 @@ describe('FakeFairMeter: what only the double does', () => {
   });
 
   test('hosted rollUp, a full overrun (nothing available): the cost absorbed, never the fee; spent stays at zero', async () => {
-    const m = new FakeFairMeter({ hosted: true, now: () => AT });
+    const m = new FakeFairMeter({ hosted: { topUpUrl: 'https://pay.dev.example' }, now: () => AT });
     m.fund('acc', 0);
     await m.link('ana@x.co', 'acc', { email: 'ana@x.co', lang: 'es' });
     m.rollUp('ana@x.co', 300);

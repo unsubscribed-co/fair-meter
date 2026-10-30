@@ -19,7 +19,7 @@ import { ACTION_LAG_MS } from './actions';
 import { assertTierThresholds, type TierThresholds } from './budget';
 import { usdToMicroUsd } from './cost';
 import { EXPORT_COLUMNS, streamFilterPattern } from './export';
-import type { Actions, FairMeterConfig } from './fair-meter';
+import { isHttpsUrl, type Actions, type FairMeterConfig } from './fair-meter';
 import { assertAppId, DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
 import { loadFeeFile, loadPriceFiles } from './prices';
 import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
@@ -590,12 +590,12 @@ export interface MeteringProps {
   maxCallsPerMinute?: number;
   tiers?: TierThresholds;
   /**
-   * 'none' (default): nobody is charged, no wallet. `{ walletTable }` (the wallet's table, same
-   * account and region): every charge, plus the fee, moves the person's wallet in the ledger's own
-   * transactions; the app's functions, the sweeper, the retry Lambda and the rollup get scoped IAM on it.
-   * The bare string 'hosted' (v0.3's placeholder) is refused at synth.
+   * 'none' (default): nobody is charged, no wallet. `{ walletTable, topUpUrl }` (the wallet's table,
+   * same account and region, and this stage's https top-up page): every charge, plus the fee, moves
+   * the person's wallet in the ledger's own transactions; the app's functions, the sweeper, the retry
+   * Lambda and the rollup get scoped IAM on it. The bare string 'hosted' (v0.3's placeholder) is refused at synth.
    */
-  billing?: 'none' | { walletTable: dynamodb.ITable } | 'hosted';
+  billing?: 'none' | { walletTable: dynamodb.ITable; topUpUrl: string } | 'hosted';
   /** The app's actions (`action`, `canWrite`); the floor is computed from these at synth. Omitted: no actions. */
   actions?: {
     /** Action SKUs, each a `unit: "units"` price file in this package's prices/. */
@@ -687,7 +687,9 @@ export class Metering extends Construct {
     if ((props as { table?: unknown }).table) throw new Error('Metering: v0.3.0 owns its ledger table: see Upgrading in the README');
     assertAppId(props.appId);
     const walletTable = typeof props.billing === 'object' && props.billing !== null ? props.billing.walletTable : undefined;
-    if (!walletTable && props.billing !== undefined && props.billing !== 'none') throw new Error("Metering: billing is 'none' or { walletTable } (the wallet's table)");
+    if (!walletTable && props.billing !== undefined && props.billing !== 'none') throw new Error("Metering: billing is 'none' or { walletTable, topUpUrl } (the wallet's table)");
+    const topUpUrl = walletTable && (props.billing as { topUpUrl: string }).topUpUrl;
+    if (walletTable && !isHttpsUrl(topUpUrl)) throw new Error("Metering: billing.topUpUrl must be this stage's https top-up URL");
     this.wallet = walletTable && walletStatements(walletTable, props.appId);
     this.errorTerms = walletTable ? [...METERING_ERRORS, ...WALLET_ERRORS] : METERING_ERRORS;
     const cap = (name: string, usd: string) => {
@@ -740,7 +742,7 @@ export class Metering extends Construct {
       ...(props.tiers ? { tiers: props.tiers } : {}),
       ...(actions ? { actions, actionFloorMicroUsd } : {}),
       // The fee rides in the config: a bundled function has no prices/ to read.
-      ...(walletTable ? { billing: { walletTable: walletTable.tableName, fee: loadFeeFile() } } : {}),
+      ...(walletTable ? { billing: { walletTable: walletTable.tableName, topUpUrl: topUpUrl!, fee: loadFeeFile() } } : {}),
     };
 
     const sweeperLogs = monthOfLogs(this, 'SweeperLogs');

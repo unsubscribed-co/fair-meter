@@ -227,7 +227,7 @@ describe('hosted billing: { walletTable }', () => {
     const s = new cdk.Stack(app, 'S');
     const walletTable = dynamodb.Table.fromTableArn(s, 'Wallet', WALLET_ARN);
     const fn = new lambda.Function(s, 'Api', { runtime: lambda.Runtime.NODEJS_24_X, handler: 'index.handler', code: lambda.Code.fromInline('x'), logGroup: new logs.LogGroup(s, 'ApiLogs') });
-    const metering = new Metering(s, 'Metering', { appId: 'stacksplit', env: 'prod', dailyCapUsd: '0.50', appDailyCapUsd: '5', billing: { walletTable }, actions: { skus: ['stacksplit-new-expense'] } });
+    const metering = new Metering(s, 'Metering', { appId: 'stacksplit', env: 'prod', dailyCapUsd: '0.50', appDailyCapUsd: '5', billing: { walletTable, topUpUrl: 'https://pay.dev.example' }, actions: { skus: ['stacksplit-new-expense'] } });
     metering.grant(fn);
     return { t: Template.fromStack(s), s, metering };
   }
@@ -241,9 +241,18 @@ describe('hosted billing: { walletTable }', () => {
     StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES', 'dynamodb:ReturnValues': ['NONE', 'UPDATED_OLD', 'UPDATED_NEW'] },
   });
 
-  test('the config names the wallet table and carries the fee of prices/fee.json', () => {
+  test("the config names the wallet table, carries the fee of prices/fee.json and the stage's top-up URL", () => {
     const { metering } = hosted();
-    expect(metering.config.billing).toEqual({ walletTable: 'wallet', fee: { versions: [{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000 }] } });
+    expect(metering.config.billing).toEqual({ walletTable: 'wallet', topUpUrl: 'https://pay.dev.example', fee: { versions: [{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000 }] } });
+  });
+
+  test.each([
+    ['no top-up URL', undefined],
+    ['a top-up URL that is not https', 'http://pay.dev.example'],
+  ])('refused at synth: %s', (_, topUpUrl) => {
+    const s = new cdk.Stack(new cdk.App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'S');
+    const walletTable = dynamodb.Table.fromTableArn(s, 'Wallet', WALLET_ARN);
+    expect(() => new Metering(s, 'Metering', { appId: 'stacksplit', env: 'prod', dailyCapUsd: '0.50', appDailyCapUsd: '5', billing: { walletTable, topUpUrl } as never })).toThrow(/topUpUrl/);
   });
 
   const get = (leadingKeys: string[], attributes: string[]) => ({ Effect: 'Allow', Action: 'dynamodb:GetItem', Resource: WALLET_ARN, Condition: scoped(leadingKeys, attributes) });

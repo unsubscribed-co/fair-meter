@@ -12,7 +12,7 @@ import { Meter } from './meter';
 import { feeAt, type FeeFile } from './prices';
 import { priceCall, priceShape, reserveCost, versionStartedBy, versionCovers, type CallUsage, type PriceShape } from './pricing';
 import { canonicalMeters, isProvider, metersFromUsage, type Provider } from './usage';
-import { feeOf, PASS_TTL_SECONDS, TOP_UP_URL, walletKeys } from './wallet';
+import { feeOf, PASS_TTL_SECONDS, walletKeys } from './wallet';
 
 /*
  * The money path for apps: `authorize` reserves an attempt's highest possible cost against the
@@ -44,9 +44,10 @@ export interface FairMeterConfig {
   tiers?: TierThresholds;
   /**
    * 'none' (default): nobody is charged. Hosted: every charge, plus the fee, moves the person's wallet
-   * in the same transaction as the ledger. `fee` is prices/fee.json (Metering writes it at synth; read from the file when absent).
+   * in the same transaction as the ledger. `topUpUrl` is where a person tops up on this stage (https),
+   * the hint on balance_too_low. `fee` is prices/fee.json (Metering writes it at synth; read from the file when absent).
    */
-  billing?: 'none' | { walletTable: string; fee?: FeeFile };
+  billing?: 'none' | { walletTable: string; topUpUrl: string; fee?: FeeFile };
   /** The table's key names when they aren't PK/SK (StackSplit: pk/sk). */
   tableKeys?: Partial<TableKeys>;
   /** The app's action SKUs and the limits the floor is computed from (Metering's `actions`). Absent: no actions. */
@@ -168,6 +169,7 @@ export type RecordOutcome = 'recorded' | 'duplicate' | 'trued_up' | 'conflict' |
 export type AttemptUsage = object | undefined | 'unknown' | 'not_billed' | 'not_sent';
 
 const positive = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
+export const isHttpsUrl = (v: unknown) => typeof v === 'string' && /^https:\/\/[^\s/]+/.test(v);
 
 function readConfig(config?: FairMeterConfig): FairMeterConfig {
   if (!config) {
@@ -179,6 +181,7 @@ function readConfig(config?: FairMeterConfig): FairMeterConfig {
   const billing = c.billing;
   if (typeof billing === 'object' && billing !== null) {
     if (!(typeof billing.walletTable === 'string' && billing.walletTable)) throw new Error('FairMeter: billing.walletTable must be the wallet table name');
+    if (!isHttpsUrl(billing.topUpUrl)) throw new Error("FairMeter: billing.topUpUrl must be the stage's https top-up URL");
   } else if (billing !== undefined && billing !== 'none') throw new Error(`FairMeter: unknown billing ${JSON.stringify(c.billing)} (hosted is { walletTable })`);
   if (!c.env || !c.tableName || !c.retryQueueUrl) throw new Error('FairMeter: env, tableName and retryQueueUrl are required');
   for (const [name, v] of Object.entries({ dailyCapMicroUsd: c.dailyCapMicroUsd, appDailyCapMicroUsd: c.appDailyCapMicroUsd })) {
@@ -705,7 +708,7 @@ export class FairMeter {
    * Hosted: who pays for `person` (their last link on this instance), the fee version's basis points
    * and the app's floor with its fee; or a ready refusal. Undefined under billing 'none'.
    */
-  private async walletCharge(person: string, at: Date): Promise<{ table: string; account: string; feeBps: number; floor: number } | Refusal | undefined> {
+  private async walletCharge(person: string, at: Date): Promise<{ table: string; topUpUrl: string; account: string; feeBps: number; floor: number } | Refusal | undefined> {
     const billing = this.cfg.billing;
     if (typeof billing !== 'object') return undefined;
     const link = this.links.get(person);
@@ -718,15 +721,15 @@ export class FairMeter {
       console.error(link ? 'LINK_CONFLICT' : 'ACCOUNT_NOT_LINKED', { appId: this.cfg.appId, person });
       return refuse(403, link ? 'link_conflict' : 'account_not_linked');
     }
-    return { table: billing.walletTable, account: link.account, feeBps: feeAt(at, billing.fee).feeBps, floor: this.capFloor(at) };
+    return { table: billing.walletTable, topUpUrl: billing.topUpUrl, account: link.account, feeBps: feeAt(at, billing.fee).feeBps, floor: this.capFloor(at) };
   }
 
   /** A debit the wallet's available can't cover; a missing BALANCE row is refused the same way and alarms. */
-  private async balanceTooLow(log: Record<string, unknown>, charge: { table: string; account: string }, tier?: BudgetTier): Promise<Refusal> {
+  private async balanceTooLow(log: Record<string, unknown>, charge: { table: string; account: string; topUpUrl: string }, tier?: BudgetTier): Promise<Refusal> {
     const { Item } = await this.ddb.send(new GetCommand({ TableName: charge.table, Key: walletKeys.balance(charge.account), ProjectionExpression: 'availableMicroUsd', ConsistentRead: true }));
     if (Item?.availableMicroUsd === undefined) console.error('BALANCE_MISSING', { ...log, account: charge.account });
     else console.warn('BALANCE_TOO_LOW', { ...log, account: charge.account, availableMicroUsd: Item.availableMicroUsd });
-    return refuse(402, 'balance_too_low', { topUpUrl: TOP_UP_URL }, tier);
+    return refuse(402, 'balance_too_low', { topUpUrl: charge.topUpUrl }, tier);
   }
 
   private limitReached(log: Record<string, unknown>, at: Date, tier: BudgetTier): Refusal {
