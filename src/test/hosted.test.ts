@@ -178,6 +178,37 @@ suite('hosted billing against DynamoDB Local', () => {
       expect((await m.authorize(ask(person))).ok).toBe(true);
     });
 
+    test("after the wallet moved (A to B to C), signing in with A again links the end of A's movedTo chain and charges it", async () => {
+      const [a, b, c] = [sub('mover-a'), sub('mover-b'), sub('mover-c')];
+      const person = who('mover');
+      expect(await meter().link(person, a, { email: person, lang: 'es' })).toBe('linked');
+      // The wallet's two moves, reduced to the rows a link reads: movedTo on each old BALANCE, LINK rewritten to the end.
+      await ddb.send(new PutCommand({ TableName: WALLET, Item: { PK: `WALLET#${a}`, SK: 'BALANCE', availableMicroUsd: 0, movedTo: b, email: 'a@x.co', lang: 'es', links: new Set([`stacksplit#${person}`]) } }));
+      await ddb.send(new PutCommand({ TableName: WALLET, Item: { PK: `WALLET#${b}`, SK: 'BALANCE', availableMicroUsd: 0, movedTo: c } }));
+      await ddb.send(new PutCommand({ TableName: WALLET, Item: { PK: `WALLET#${c}`, SK: 'BALANCE', availableMicroUsd: 100_000, heldMicroUsd: 0, spentMicroUsd: 0, email: 'c@x.co', lang: 'en' } }));
+      await relink(person, c);
+      const m = meter();
+      expect(await m.link(person, a, { email: 'a@x.co', lang: 'es' })).toBe('linked');
+      expect(await m.authorize(ask(person))).toMatchObject({ ok: true, hold: { account: c } });
+      expect(await balance(c)).toMatchObject({ heldMicroUsd: HELD, email: 'c@x.co', lang: 'en' });
+      // A first link in another app, signed in with A: LINK and links go to C, C's labels stay its own.
+      expect(await meter({ appId: 'nieto' }).link(a, a, { email: 'a@x.co', lang: 'es' })).toBe('linked');
+      expect(await getW(`LINK#nieto#${a}`, 'LINK')).toMatchObject({ account: c });
+      expect(await balance(c)).toMatchObject({ links: new Set([`nieto#${a}`]), email: 'c@x.co', lang: 'en' });
+      expect((await balance(a))?.links).toEqual(new Set([`stacksplit#${person}`]));
+    });
+
+    test('a movedTo chain longer than the bound: conflict, nothing written, MOVE_CHAIN_TOO_LONG', async () => {
+      const chain = Array.from({ length: 52 }, (_, i) => sub(`hop${i}`));
+      for (let i = 0; i < chain.length - 1; i++) await ddb.send(new PutCommand({ TableName: WALLET, Item: { PK: `WALLET#${chain[i]}`, SK: 'BALANCE', availableMicroUsd: 0, movedTo: chain[i + 1] } }));
+      const person = who('hops');
+      const m = meter();
+      expect(await m.link(person, chain[0], { email: person, lang: 'en' })).toBe('conflict');
+      expect(console.error).toHaveBeenCalledWith('MOVE_CHAIN_TOO_LONG', expect.objectContaining({ person }));
+      expect(await getW(`LINK#stacksplit#${person}`, 'LINK')).toBeUndefined();
+      expect(await m.authorize(ask(person))).toMatchObject({ ok: false, body: { error: 'link_conflict' } });
+    });
+
     test("billing 'none': link and walletPass reject", async () => {
       const m = meter({ billing: 'none' });
       await expect(m.link(who('none'), sub('none'), { email: 'x', lang: 'en' })).rejects.toThrow(/hosted/);

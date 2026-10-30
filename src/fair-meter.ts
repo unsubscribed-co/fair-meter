@@ -200,8 +200,8 @@ export class FairMeter {
   private readonly prices = new Map<string, { readAt: number; versions: Record<string, any>[] }>();
   /** Actions per person in the current UTC minute, this instance only; a new minute starts an empty map. */
   private actionCounts = { minute: '', perPerson: new Map<string, number>() };
-  /** Hosted: each person's last `link` on this instance: the account that pays (none: a link conflict), the labels, when LINK was read. */
-  private readonly links = new Map<string, { sub: string; account?: string; email: string; lang: string; readAt: number }>();
+  /** Hosted: each person's last `link` on this instance: the signed-in sub, where its wallet lives (`to`, after moves), the account that pays (none: a link conflict), the labels, when LINK was read. */
+  private readonly links = new Map<string, { sub: string; to: string; account?: string; email: string; lang: string; readAt: number }>();
 
   /** Reads FAIR_METER when `config` is omitted. Throws on a bad config (startup, never after a paid call). */
   constructor(config?: FairMeterConfig, clients: { ddb?: DynamoDBDocumentClient; sqs?: SQSClient; now?: () => Date } = {}) {
@@ -576,7 +576,9 @@ export class FairMeter {
    * link_conflict until support relinks (wallet ADR 0003). A changed email or lang on the same
    * account updates those labels only (an app keyed by account id never relinks). Remembered per
    * instance for 5 minutes, so a relink by support or a move is seen within that: hosted calls use
-   * the account of the person's last link here. Rejects on a read or write error.
+   * the account of the person's last link here. A sub whose wallet moved stands for the end of its
+   * movedTo chain (at most 50 reads; longer is a 'conflict' logged MOVE_CHAIN_TOO_LONG), whose labels
+   * it leaves alone. Rejects on a read or write error.
    */
   async link(person: string, sub: string, labels: { email: string; lang: string }): Promise<LinkOutcome> {
     const table = this.walletTable('link');
@@ -592,30 +594,38 @@ export class FairMeter {
     for (let attempt = 0; ; attempt++) {
       const [{ Item }, { Item: shown }] = await Promise.all([
         this.ddb.send(new GetCommand({ TableName: table, Key: key, ProjectionExpression: 'account', ConsistentRead: true })),
-        this.ddb.send(new GetCommand({ TableName: table, Key: walletKeys.balance(sub), ProjectionExpression: 'email, lang' })),
+        this.ddb.send(new GetCommand({ TableName: table, Key: walletKeys.balance(sub), ProjectionExpression: 'email, lang, movedTo' })),
       ]);
+      // A wallet the wallet moved (A to B) lives at the end of A's movedTo chain, where the move rewrote A's links.
+      const to = shown?.movedTo ? await this.endOfMoves(table, shown.movedTo) : sub;
+      if (!to) {
+        console.error('MOVE_CHAIN_TOO_LONG', { appId: this.cfg.appId, person });
+        this.links.set(person, { sub, to: sub, ...labels, readAt: at });
+        return 'conflict';
+      }
       if (Item) {
-        const same = Item.account === sub;
+        const same = Item.account === to;
         if (!same) console.error('LINK_CONFLICT', { appId: this.cfg.appId, person });
-        else if (shown?.email !== labels.email || shown?.lang !== labels.lang) await this.relabel(table, sub, labels);
-        this.links.set(person, { sub, ...(same ? { account: sub } : {}), ...labels, readAt: at });
+        else if (to === sub && (shown?.email !== labels.email || shown?.lang !== labels.lang)) await this.relabel(table, sub, labels);
+        this.links.set(person, { sub, to, ...(same ? { account: to } : {}), ...labels, readAt: at });
         return same ? 'linked' : 'conflict';
       }
       try {
         await this.ddb.send(new TransactWriteCommand({
           TransactItems: [
-            { Update: { TableName: table, Key: key, UpdateExpression: 'SET account = :sub', ConditionExpression: 'attribute_not_exists(PK)', ExpressionAttributeValues: { ':sub': sub } } },
+            { Update: { TableName: table, Key: key, UpdateExpression: 'SET account = :to', ConditionExpression: 'attribute_not_exists(PK)', ExpressionAttributeValues: { ':to': to } } },
             {
               Update: {
                 TableName: table,
-                Key: walletKeys.balance(sub),
-                UpdateExpression: 'ADD links :link SET email = :email, lang = :lang',
-                ExpressionAttributeValues: { ':link': new Set([`${this.cfg.appId}#${person}`]), ':email': labels.email, ':lang': labels.lang },
+                Key: walletKeys.balance(to),
+                // The labels are the signed-in account's: a moved-to wallet keeps its own.
+                UpdateExpression: to === sub ? 'ADD links :link SET email = :email, lang = :lang' : 'ADD links :link',
+                ExpressionAttributeValues: { ':link': new Set([`${this.cfg.appId}#${person}`]), ...(to === sub && { ':email': labels.email, ':lang': labels.lang }) },
               },
             },
           ],
         }));
-        this.links.set(person, { sub, account: sub, ...labels, readAt: at });
+        this.links.set(person, { sub, to, account: to, ...labels, readAt: at });
         return 'linked';
       } catch (err) {
         // Another instance linked this person first (or the BALANCE was busy): read again, then decide.
@@ -641,6 +651,16 @@ export class FairMeter {
       ConditionExpression: 'attribute_not_exists(PK)',
     }));
     return random;
+  }
+
+  /** The end of a moved account's movedTo chain; undefined past MAX_MOVE_HOPS reads (the wallet's own bound). */
+  private async endOfMoves(table: string, account: string): Promise<string | undefined> {
+    for (let reads = 1; reads < MAX_MOVE_HOPS; reads++) {
+      const { Item } = await this.ddb.send(new GetCommand({ TableName: table, Key: walletKeys.balance(account), ProjectionExpression: 'movedTo', ConsistentRead: true }));
+      if (!Item?.movedTo) return account;
+      account = Item.movedTo;
+    }
+    return undefined;
   }
 
   /** The labels on an existing BALANCE row, and nothing else. */
@@ -671,7 +691,7 @@ export class FairMeter {
     if (link && !link.account) {
       // A conflict support may have resolved since: LINK read again before refusing.
       const { Item } = await this.ddb.send(new GetCommand({ TableName: billing.walletTable, Key: walletKeys.link(this.cfg.appId, person), ProjectionExpression: 'account', ConsistentRead: true }));
-      if (Item?.account === link.sub) link.account = link.sub;
+      if (Item?.account === link.to) link.account = link.to;
     }
     if (!link?.account) {
       console.error(link ? 'LINK_CONFLICT' : 'ACCOUNT_NOT_LINKED', { appId: this.cfg.appId, person });
@@ -764,6 +784,8 @@ function badRequest(req: CallRequest | undefined): string | undefined {
 const PRICE_CACHE_MS = 5 * 60_000;
 /** How long a link is trusted on an instance before `link` reads LINK again (a relink by support, a move). */
 const LINK_CACHE_MS = 5 * 60_000;
+/** The most BALANCE reads a link spends following movedTo, as the wallet's own endOfChain. */
+const MAX_MOVE_HOPS = 50;
 
 /** AUTHORIZE_TIMING's facts as authorize goes: the reads' ms, when the reserve began, its sends. */
 type Timing = { readsMs: number; reserving?: number; attempts: number };

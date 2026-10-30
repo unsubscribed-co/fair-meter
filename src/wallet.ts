@@ -6,8 +6,8 @@
 
 /** `WALLET#<account>` / `BALANCE`: the only mutable wallet row, moved by conditional ADDs. */
 export interface WalletBalance {
-  /** What apps may spend now: the guard of every debit. */
-  availableMicroUsd: number;
+  /** What apps may spend now: the guard of every debit. Absent until the wallet grants (a first link can create the row). */
+  availableMicroUsd?: number;
   creditedMicroUsd?: number;
   spentMicroUsd?: number;
   heldMicroUsd?: number;

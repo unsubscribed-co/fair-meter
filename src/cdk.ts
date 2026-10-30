@@ -617,7 +617,7 @@ export interface MeteringProps {
 const METERING_ERRORS = ['METER_UNAVAILABLE', 'PRICE_MISSING', 'SERVICE_PAUSED', 'CALL_EXCEEDS_CAP', 'CALL_ID_REUSED', 'USAGE_MISSING', 'RECORD_CONFLICT', 'USAGE_RECORD_FAILED', 'RESERVATION_EXCEEDED', 'USAGE_RECORD_PARKED', 'ACTION_UNKNOWN',
   'ACTION_UNPRICED', 'ROLLUP_TRUNCATED', 'ROLLUP_FAILED', 'ROLLUP_LATE'];
 /** Hosted billing adds these: a rollup charge the wallet couldn't cover, and the refusals support must look at. */
-const WALLET_ERRORS = ['FLOOR_OVERRUN', 'ACCOUNT_NOT_LINKED', 'LINK_CONFLICT', 'BALANCE_MISSING'];
+const WALLET_ERRORS = ['FLOOR_OVERRUN', 'ACCOUNT_NOT_LINKED', 'LINK_CONFLICT', 'BALANCE_MISSING', 'MOVE_CHAIN_TOO_LONG'];
 
 /**
  * What an app's code may do on the wallet table (wallet ADR 0001): read and conditionally ADD to the
@@ -637,7 +637,7 @@ function walletStatements(table: dynamodb.ITable, appId: string): iam.PolicyStat
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
       resources: [table.tableArn],
-      conditions: scoped(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', appId, 'links', 'email', 'lang', 'account']),
+      conditions: scoped(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', appId, 'links', 'email', 'lang', 'movedTo', 'account']),
     }),
     new iam.PolicyStatement({ actions: ['dynamodb:PutItem'], resources: [table.tableArn], conditions: scoped(['PASS#*'], ['account', 'expiresAt']) }),
   ];

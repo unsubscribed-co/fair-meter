@@ -252,7 +252,7 @@ describe('hosted billing: { walletTable }', () => {
       expect(walletStatements(hosted().t, prefix)).toEqual([
         {
           Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'], Resource: WALLET_ARN,
-          Condition: scoped(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'links', 'email', 'lang', 'account']),
+          Condition: scoped(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'links', 'email', 'lang', 'movedTo', 'account']),
         },
         { Effect: 'Allow', Action: 'dynamodb:PutItem', Resource: WALLET_ARN, Condition: scoped(['PASS#*'], ['account', 'expiresAt']) },
       ]);
@@ -261,7 +261,7 @@ describe('hosted billing: { walletTable }', () => {
 
   test('its error terms join the metering error alarm', () => {
     hosted().t.hasResourceProperties('AWS::Logs::MetricFilter', {
-      FilterPattern: Match.stringLikeRegexp('ROLLUP_LATE.*FLOOR_OVERRUN.*ACCOUNT_NOT_LINKED.*LINK_CONFLICT.*BALANCE_MISSING'), LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') },
+      FilterPattern: Match.stringLikeRegexp('ROLLUP_LATE.*FLOOR_OVERRUN.*ACCOUNT_NOT_LINKED.*LINK_CONFLICT.*BALANCE_MISSING.*MOVE_CHAIN_TOO_LONG'), LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') },
     });
   });
 });
