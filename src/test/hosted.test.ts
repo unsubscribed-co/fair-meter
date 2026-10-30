@@ -346,8 +346,20 @@ suite('hosted billing against DynamoDB Local', () => {
       await rollUp('rollb', [{ person, n: 1_000, account }]);
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 0, spentMicroUsd: 5_000 });
       expect(await spend(account)).toMatchObject({ rollb: 5_000 });
-      expect((await events(person)).find((e) => e.appId === 'rollb')).toMatchObject({ costMicroUsd: THOUSAND, feeMicroUsd: THOUSAND, absorbedMicroUsd: 2 * THOUSAND - 5_000, account });
-      expect(console.error).toHaveBeenCalledWith('FLOOR_OVERRUN', expect.objectContaining({ account, chargedMicroUsd: 5_000, absorbedMicroUsd: 2 * THOUSAND - 5_000 }));
+      // The 5,000 charged is cost and fee at the fee's rate (2,500 each): only cost is absorbed.
+      expect((await events(person)).find((e) => e.appId === 'rollb')).toMatchObject({ costMicroUsd: THOUSAND, feeMicroUsd: 2_500, absorbedMicroUsd: THOUSAND - 2_500, account });
+      expect(console.error).toHaveBeenCalledWith('FLOOR_OVERRUN', expect.objectContaining({ account, chargedMicroUsd: 5_000, absorbedMicroUsd: THOUSAND - 2_500 }));
+    });
+
+    test('rollup, a full overrun (nothing available): the whole cost absorbed, no fee, and the person has spent nothing, never below zero', async () => {
+      const person = who('broke');
+      const account = sub('broke');
+      await fund(account, 0);
+      await rollUp('rolle', [{ person, n: 1_000, account }]);
+      expect(await balance(account)).toMatchObject({ availableMicroUsd: 0, spentMicroUsd: 0 });
+      expect((await events(person)).find((e) => e.appId === 'rolle')).toMatchObject({ costMicroUsd: THOUSAND, feeMicroUsd: 0, absorbedMicroUsd: THOUSAND });
+      const { day, month } = await meter({ appId: 'rolle' }).usage(person);
+      expect([day.spentMicroUsd, month.spentMicroUsd]).toEqual([0, 0]);
     });
 
     test('rollup: available moved between its read and its write (another app charged): the condition refuses, it reads again and charges what is left', async () => {
@@ -367,7 +379,7 @@ suite('hosted billing against DynamoDB Local', () => {
       await rollUp('rollc', [{ person, n: 1_000, account }]);
       expect(raced).toBe(true);
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 0, spentMicroUsd: 10_000 });
-      expect((await events(person)).find((e) => e.appId === 'rollc')).toMatchObject({ absorbedMicroUsd: 2 * THOUSAND - 10_000 });
+      expect((await events(person)).find((e) => e.appId === 'rollc')).toMatchObject({ feeMicroUsd: 5_000, absorbedMicroUsd: THOUSAND - 5_000 });
     });
 
     test('canWrite: available at or above the floor plus its fee; below it balance_too_low; unlinked account_not_linked', async () => {
@@ -428,7 +440,8 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await m.record(call, usage)).toBe('recorded');
       expect(console.error).toHaveBeenCalledWith('RESERVATION_EXCEEDED', expect.anything());
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000 - held, heldMicroUsd: 0, spentMicroUsd: held });
-      expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: 440, feeMicroUsd: 440, absorbedMicroUsd: 880 - held })]);
+      // Charged at the hold: its cost part (the reservation) and its fee apart; only cost is absorbed.
+      expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: 440, feeMicroUsd: held / 2, absorbedMicroUsd: 440 - held / 2 })]);
     });
 
     test("release ('not_billed'): the whole hold back to available, nothing spent, no SPEND", async () => {

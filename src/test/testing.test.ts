@@ -295,7 +295,18 @@ describe('FakeFairMeter: what only the double does', () => {
     expect((await m.usage('ana@x.co')).wallet).toEqual({ availableMicroUsd: 400 });
     m.rollUp('ana@x.co', 300);
     expect((await m.usage('ana@x.co')).wallet).toEqual({ availableMicroUsd: 0 });
-    expect(console.error).toHaveBeenCalledWith('FLOOR_OVERRUN', expect.objectContaining({ chargedMicroUsd: 400, absorbedMicroUsd: 200 }));
+    // The 400 charged is 200 of cost and 200 of fee: only cost is absorbed.
+    expect(console.error).toHaveBeenCalledWith('FLOOR_OVERRUN', expect.objectContaining({ chargedMicroUsd: 400, absorbedMicroUsd: 100 }));
+  });
+
+  test('hosted rollUp, a full overrun (nothing available): the cost absorbed, never the fee; spent stays at zero', async () => {
+    const m = new FakeFairMeter({ hosted: true, now: () => AT });
+    m.fund('acc', 0);
+    await m.link('ana@x.co', 'acc', { email: 'ana@x.co', lang: 'es' });
+    m.rollUp('ana@x.co', 300);
+    expect(console.error).toHaveBeenCalledWith('FLOOR_OVERRUN', expect.objectContaining({ chargedMicroUsd: 0, absorbedMicroUsd: 300 }));
+    const { day, month } = await m.usage('ana@x.co');
+    expect([day.spentMicroUsd, month.spentMicroUsd]).toEqual([0, 0]);
   });
 
   test('calls: every public call it saw, in order, with its arguments', async () => {

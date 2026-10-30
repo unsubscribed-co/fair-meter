@@ -6,7 +6,7 @@ import { pastFloor } from './actions';
 import { assertTierThresholds, dayTier, type BudgetTier, type TierThresholds } from './budget';
 import type { Meters } from './cost';
 import { assertAppId, conditionFailed, keys, nextUtcDay, nextUtcMonth, pkNotExists, secondsToNextUtcMinute, setTableKeys, skOf, tableKeys, utcDay, utcMinute, utcMonth, type TableKeys } from './keys';
-import { absorbedOf, recordUsage, type UsageRecord } from './ledger';
+import { absorbedOf, recordUsage, walletChargeOf, type UsageRecord } from './ledger';
 import { takeCapacity } from './measure';
 import { Meter } from './meter';
 import { feeAt, type FeeFile } from './prices';
@@ -865,9 +865,7 @@ export function holdRecord(
     if (!facts.walletTable || !Number.isInteger(h.feeBps)) throw new Error(`A hosted hold needs the wallet table and its feeBps: ${facts.callId}`);
     const held = h.reservedMicroUsd + feeOf(h.reservedMicroUsd, h.feeBps!);
     // The person pays what served them, plus the fee on it, never more than the hold.
-    const paid = cost - absorbedOf(record);
-    const fee = feeOf(paid, h.feeBps!);
-    record.wallet = { table: facts.walletTable, account: h.account, heldMicroUsd: held, feeMicroUsd: fee, chargedMicroUsd: Math.min(paid + fee, held) };
+    record.wallet = { table: facts.walletTable, account: h.account, heldMicroUsd: held, ...walletChargeOf(cost - absorbedOf(record), h.feeBps!, held) };
   }
   record.usageHash = createHash('sha256')
     .update(JSON.stringify([record.kind, record.details, record.costMicroUsd, record.estimated ?? null, record.release ?? false]))

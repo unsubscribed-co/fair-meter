@@ -3,7 +3,7 @@ import { pastFloor } from './actions';
 import { dayTier, type TierThresholds } from './budget';
 import { settlementRecord, type Actions, type AttemptUsage, type CallRequest, type FairMeterApi, type Hold, type LinkOutcome, type PersonUsage, type RecordOutcome, type Refusal, type RefusalCode, type Reservation } from './fair-meter';
 import { nextUtcDay, nextUtcMonth, secondsToNextUtcMinute, utcDay, utcMinute, utcMonth } from './keys';
-import { absorbedOf } from './ledger';
+import { absorbedOf, walletChargeOf } from './ledger';
 import { feeAt, loadPriceFiles, type PriceFile } from './prices';
 import { reserveCost, versionStartedBy } from './pricing';
 import { feeOf, TOP_UP_URL } from './wallet';
@@ -77,11 +77,11 @@ export class FakeFairMeter implements FairMeterApi {
     let absorbed = 0;
     const account = this.links.get(person);
     if (this.options.hosted && account) {
-      const due = costMicroUsd + feeOf(costMicroUsd, feeAt(at).feeBps);
-      const charged = Math.min(due, this.available.get(account) ?? 0);
-      this.available.set(account, (this.available.get(account) ?? 0) - charged);
-      absorbed = due - charged;
-      if (absorbed) console.error('FLOOR_OVERRUN', { person, account, chargedMicroUsd: charged, absorbedMicroUsd: absorbed });
+      const { feeMicroUsd, chargedMicroUsd } = walletChargeOf(costMicroUsd, feeAt(at).feeBps, this.available.get(account) ?? 0);
+      this.available.set(account, (this.available.get(account) ?? 0) - chargedMicroUsd);
+      // Only cost is absorbed, never the fee.
+      absorbed = costMicroUsd + feeMicroUsd - chargedMicroUsd;
+      if (absorbed) console.error('FLOOR_OVERRUN', { person, account, chargedMicroUsd, absorbedMicroUsd: absorbed });
     }
     for (const row of [this.row(person, utcDay(at)), this.row(person, utcMonth(at))]) {
       row.cost += costMicroUsd;

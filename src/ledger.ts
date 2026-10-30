@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { adjustmentId, applyAdjustment } from './adjust';
 import { keys, pkExists, pkNotExists, skOf, type TableKey } from './keys';
-import { walletKeys } from './wallet';
+import { feeOf, walletKeys } from './wallet';
 
 /**
  * One metered call, fully priced. It is plain JSON so it can wait on the retry queue and be
@@ -69,14 +69,26 @@ export interface UsageRecord {
 }
 
 /**
- * What the operator absorbs of a settle: the whole cost of an attempt that didn't serve the person
- * (swept, aborted). It still counts toward the cap; the person is charged cost minus absorbed.
- * Hosted, also what the wallet couldn't be charged (above the hold, or a rollup's floor overrun):
- * cost + fee - charged.
+ * What the operator absorbs of a settle, always a part of cost: the whole cost of an attempt that
+ * didn't serve the person (swept, aborted). It still counts toward the cap; the person is charged
+ * cost minus absorbed. Hosted, the cost the wallet wasn't charged (above the hold, or a rollup's
+ * floor overrun): cost + fee - charged, where the fee is the part of the charge that is fee (walletChargeOf).
  */
 export const absorbedOf = (r: Pick<UsageRecord, 'estimated' | 'release' | 'costMicroUsd' | 'wallet'>) =>
   r.wallet ? (r.release ? 0 : r.costMicroUsd + r.wallet.feeMicroUsd - r.wallet.chargedMicroUsd)
     : !r.release && (r.estimated === 'swept' || r.estimated === 'aborted') ? r.costMicroUsd : 0;
+
+/**
+ * Hosted: what the wallet is charged for `paidMicroUsd` of cost plus its fee, at most `capMicroUsd`
+ * (the hold, or what the rollup found available). A capped charge splits into cost and fee at the
+ * fee's rate, so the fee is only ever on cost the person paid: absorbed stays a part of cost.
+ */
+export function walletChargeOf(paidMicroUsd: number, feeBps: number, capMicroUsd: number) {
+  const fee = feeOf(paidMicroUsd, feeBps);
+  if (paidMicroUsd + fee <= capMicroUsd) return { feeMicroUsd: fee, chargedMicroUsd: paidMicroUsd + fee };
+  const charged = Math.max(0, capMicroUsd);
+  return { feeMicroUsd: charged - Math.floor((charged * 10_000) / (10_000 + feeBps)), chargedMicroUsd: charged };
+}
 
 /**
  * Hosted: the person's wallet in the usage transaction. A settle or release gives the hold back and

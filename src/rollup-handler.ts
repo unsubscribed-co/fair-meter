@@ -4,7 +4,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCom
 import { ACTION_LAG_MS } from './actions';
 import type { FairMeterConfig } from './fair-meter';
 import { conditionFailed, keys, pkNotExists, setTableKeys, skOf, tableKeys } from './keys';
-import { recordUsage, type UsageRecord } from './ledger';
+import { absorbedOf, recordUsage, walletChargeOf, type UsageRecord } from './ledger';
 import { QUERY_ROW_LIMIT, runQuery } from './logs-insights';
 import { feeAt } from './prices';
 import { priceCall, versionStartedBy, versionCovers } from './pricing';
@@ -95,14 +95,13 @@ export async function rollup(
           deductCredit: false,
           env,
           // Hosted: the account on the lines pays (lines from before the switch carry none and charge no wallet).
-          ...(billing && account
-            ? { wallet: { table: billing.walletTable, account, feeMicroUsd: feeOf(priced.costMicroUsd, feeAt(new Date(start), billing.fee).feeBps), chargedMicroUsd: 0 } }
-            : {}),
+          // The charge and its fee are set by chargeActions, from what is available.
+          ...(billing && account ? { wallet: { table: billing.walletTable, account, feeMicroUsd: 0, chargedMicroUsd: 0 } } : {}),
         });
       }
       for (const r of records) {
         // Without a hold, recordUsage resolves only these two (anything else throws).
-        done[(r.wallet ? await chargeActions(ddb, cfg.tableName, r) : await recordUsage(ddb, cfg.tableName, r)) as 'recorded' | 'duplicate']++;
+        done[(r.wallet ? await chargeActions(ddb, cfg.tableName, r, feeAt(new Date(start), billing!.fee).feeBps) : await recordUsage(ddb, cfg.tableName, r)) as 'recorded' | 'duplicate']++;
       }
       await ddb.send(new UpdateCommand({
         TableName: cfg.tableName,
@@ -126,16 +125,16 @@ export async function rollup(
  * transaction on the condition that available still covers it; a refused condition (another app
  * charged in between) or a conflict reads again. A shortfall is absorbed on the EVENT, FLOOR_OVERRUN.
  */
-async function chargeActions(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord) {
-  const w = r.wallet!;
-  const due = r.costMicroUsd + w.feeMicroUsd;
+async function chargeActions(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord, feeBps: number) {
+  const due = r.costMicroUsd + feeOf(r.costMicroUsd, feeBps);
   for (let attempt = 0; ; attempt++) {
+    const w = r.wallet!;
     const { Item } = await ddb.send(new GetCommand({ TableName: w.table, Key: walletKeys.balance(w.account), ProjectionExpression: 'availableMicroUsd', ConsistentRead: true }));
-    const charged = Math.min(due, Math.max(0, Number(Item?.availableMicroUsd ?? 0)));
+    const charged = { ...r, wallet: { ...w, ...walletChargeOf(r.costMicroUsd, feeBps, Number(Item?.availableMicroUsd ?? 0)) } };
     try {
-      const outcome = await recordUsage(ddb, table, { ...r, wallet: { ...w, chargedMicroUsd: charged } });
-      if (outcome === 'recorded' && charged < due) {
-        console.error('FLOOR_OVERRUN', { appId: r.appId, person: r.sub, account: w.account, requestId: r.requestId, chargedMicroUsd: charged, absorbedMicroUsd: due - charged });
+      const outcome = await recordUsage(ddb, table, charged);
+      if (outcome === 'recorded' && charged.wallet.chargedMicroUsd < due) {
+        console.error('FLOOR_OVERRUN', { appId: r.appId, person: r.sub, account: w.account, requestId: r.requestId, chargedMicroUsd: charged.wallet.chargedMicroUsd, absorbedMicroUsd: absorbedOf(charged) });
       }
       return outcome;
     } catch (err) {
