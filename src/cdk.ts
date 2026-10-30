@@ -650,7 +650,8 @@ function walletStatements(table: dynamodb.ITable, appId: string) {
     // A swept hold is absorbed: it only gives the hold back.
     sweeper: [scoped('UpdateItem', wallet, ['availableMicroUsd', 'heldMicroUsd'])],
     retry: [scoped('UpdateItem', wallet, ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', appId])],
-    rollup: [scoped('GetItem', wallet, ['availableMicroUsd']), scoped('UpdateItem', wallet, ['availableMicroUsd', 'spentMicroUsd', appId])],
+    // Reads movedTo (read only) to charge the end of a moved account's chain.
+    rollup: [scoped('GetItem', wallet, ['availableMicroUsd', 'movedTo']), scoped('UpdateItem', wallet, ['availableMicroUsd', 'spentMicroUsd', appId])],
   };
 }
 

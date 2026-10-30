@@ -262,8 +262,8 @@ describe('hosted billing: { walletTable }', () => {
     ['MeteringSweeperServiceRoleDefaultPolicy', [update(['WALLET#*'], ['availableMicroUsd', 'heldMicroUsd'])]],
     // A queued settle or release: the hold back, the charge spent and added to SPEND.
     ['MeteringRetryFnServiceRoleDefaultPolicy', [update(['WALLET#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit'])]],
-    // Reads available, then charges it (no hold).
-    ['MeteringRollupServiceRoleDefaultPolicy', [get(['WALLET#*'], ['availableMicroUsd']), update(['WALLET#*'], ['availableMicroUsd', 'spentMicroUsd', 'stacksplit'])]],
+    // Reads available (following movedTo after a move), then charges it (no hold).
+    ['MeteringRollupServiceRoleDefaultPolicy', [get(['WALLET#*'], ['availableMicroUsd', 'movedTo']), update(['WALLET#*'], ['availableMicroUsd', 'spentMicroUsd', 'stacksplit'])]],
   ])('%s: only the wallet counters it moves, on WALLET# only: no LINK#, no PASS#, no labels', (prefix, expected) => {
     expect(walletStatements(hosted().t, prefix)).toEqual(expected);
   });

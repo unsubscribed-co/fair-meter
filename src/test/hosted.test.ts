@@ -410,6 +410,40 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await m.usage(who('nousage'))).not.toHaveProperty('wallet');
     });
 
+    /** The wallet's move of A to B, reduced to the rows the rollup reads: A emptied with movedTo, B holding the balance. */
+    const moved = async (a: string, b: string, availableMicroUsd: number) => {
+      await ddb.send(new PutCommand({ TableName: WALLET, Item: { PK: `WALLET#${a}`, SK: 'BALANCE', availableMicroUsd: 0, heldMicroUsd: 0, spentMicroUsd: 0, movedTo: b } }));
+      await fund(b, availableMicroUsd);
+    };
+
+    test("rollup after a move: lines logged under the old account (within an instance's link cache) charge the end of its movedTo chain, nothing absorbed", async () => {
+      const person = who('movedlines');
+      const [a, b] = [sub('movedlines-a'), sub('movedlines-b')];
+      await moved(a, b, 100_000);
+      expect(await rollUp('rollf', [{ person, n: 1_000, account: a }])).toMatchObject({ recorded: 1 });
+      expect(await balance(b)).toMatchObject({ availableMicroUsd: 100_000 - 2 * THOUSAND, spentMicroUsd: 2 * THOUSAND });
+      expect(await spend(b)).toMatchObject({ rollf: 2 * THOUSAND });
+      expect(await balance(a)).toMatchObject({ availableMicroUsd: 0, spentMicroUsd: 0 });
+      const event = (await events(person)).find((e) => e.appId === 'rollf');
+      expect(event).toMatchObject({ costMicroUsd: THOUSAND, feeMicroUsd: THOUSAND, account: b });
+      expect(event).not.toHaveProperty('absorbedMicroUsd');
+      expect(console.error).not.toHaveBeenCalledWith('FLOOR_OVERRUN', expect.anything());
+    });
+
+    test('two accounts for one person, SKU and window (a move mid-window): each its own EVENT, both charged, and a rerun charges neither again', async () => {
+      const person = who('twoaccounts');
+      const [a, b] = [sub('twoaccounts-a'), sub('twoaccounts-b')];
+      await moved(a, b, 100_000);
+      // 500 new expenses: $0.004437 at list price.
+      expect(await rollUp('rollg', [{ person, n: 1_000, account: a }, { person, n: 500, account: b }])).toMatchObject({ recorded: 2 });
+      expect(await balance(b)).toMatchObject({ availableMicroUsd: 100_000 - 2 * THOUSAND - 2 * 4_437, spentMicroUsd: 2 * THOUSAND + 2 * 4_437 });
+      expect((await events(person)).filter((e) => e.appId === 'rollg').map((e) => e.costMicroUsd).sort()).toEqual([4_437, THOUSAND]);
+      lines([{ person, n: 1_000, account: a }, { person, n: 500, account: b }]);
+      await ddb.send(new UpdateCommand({ TableName: LEDGER, Key: { PK: 'ROLLUP#rollg', SK: 'CURSOR' }, UpdateExpression: 'SET lastWindowStart = :w', ExpressionAttributeValues: { ':w': '2026-11-03T13:45:00.000Z' } }));
+      expect(await rollup(ddb, cwl, { ...config, appId: 'rollg' }, ['/aws/lambda/api'], new Date('2026-11-03T14:30:00Z'))).toMatchObject({ duplicate: 2 });
+      expect(await balance(b)).toMatchObject({ spentMicroUsd: 2 * THOUSAND + 2 * 4_437 });
+    });
+
     test('rollup: lines without an account (written before the switch to hosted) charge no wallet', async () => {
       const person = who('before');
       await rollUp('rolld', [{ person, n: 1_000 }]);

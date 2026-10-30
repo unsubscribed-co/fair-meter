@@ -2,7 +2,7 @@ import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ACTION_LAG_MS } from './actions';
-import type { FairMeterConfig } from './fair-meter';
+import { MAX_MOVE_HOPS, type FairMeterConfig } from './fair-meter';
 import { conditionFailed, keys, pkNotExists, setTableKeys, skOf, tableKeys } from './keys';
 import { absorbedOf, recordUsage, walletChargeOf, type UsageRecord } from './ledger';
 import { QUERY_ROW_LIMIT, runQuery } from './logs-insights';
@@ -83,7 +83,8 @@ export async function rollup(
         records.push({
           appId: cfg.appId,
           sub: person,
-          requestId: `actions-${sku}-${windowStart}`,
+          // Hosted: one EVENT per account on the lines too (a move mid-window logs two for one person and SKU).
+          requestId: `actions-${sku}-${windowStart}${billing && account ? `-${account}` : ''}`,
           requestTime: windowStart,
           kind: 'actions',
           pricingVersion: price.version,
@@ -124,13 +125,13 @@ export async function rollup(
  * Rolled-up actions under hosted billing: charged = min(cost + fee, available), written in the EVENT's
  * transaction on the condition that available still covers it; a refused condition (another app
  * charged in between) or a conflict reads again. A shortfall is absorbed on the EVENT, FLOOR_OVERRUN.
+ * Lines logged under an account the wallet has since moved charge the end of its movedTo chain.
  */
 async function chargeActions(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord, feeBps: number) {
   const due = r.costMicroUsd + feeOf(r.costMicroUsd, feeBps);
   for (let attempt = 0; ; attempt++) {
-    const w = r.wallet!;
-    const { Item } = await ddb.send(new GetCommand({ TableName: w.table, Key: walletKeys.balance(w.account), ProjectionExpression: 'availableMicroUsd', ConsistentRead: true }));
-    const charged = { ...r, wallet: { ...w, ...walletChargeOf(r.costMicroUsd, feeBps, Number(Item?.availableMicroUsd ?? 0)) } };
+    const w = { ...r.wallet!, ...await payingBalance(ddb, r) };
+    const charged = { ...r, wallet: { table: w.table, account: w.account, ...walletChargeOf(r.costMicroUsd, feeBps, w.availableMicroUsd) } };
     try {
       const outcome = await recordUsage(ddb, table, charged);
       if (outcome === 'recorded' && charged.wallet.chargedMicroUsd < due) {
@@ -143,6 +144,21 @@ async function chargeActions(ddb: DynamoDBDocumentClient, table: string, r: Usag
       throw err;
     }
   }
+}
+
+/**
+ * The account that pays for lines logged under `r.wallet.account`, and its available: the end of
+ * its movedTo chain. Past MAX_MOVE_HOPS reads, MOVE_CHAIN_TOO_LONG and nothing available (absorbed).
+ */
+async function payingBalance(ddb: DynamoDBDocumentClient, r: UsageRecord): Promise<{ account: string; availableMicroUsd: number }> {
+  let account = r.wallet!.account;
+  for (let reads = 0; reads < MAX_MOVE_HOPS; reads++) {
+    const { Item } = await ddb.send(new GetCommand({ TableName: r.wallet!.table, Key: walletKeys.balance(account), ProjectionExpression: 'availableMicroUsd, movedTo', ConsistentRead: true }));
+    if (!Item?.movedTo) return { account, availableMicroUsd: Number(Item?.availableMicroUsd ?? 0) };
+    account = Item.movedTo;
+  }
+  console.error('MOVE_CHAIN_TOO_LONG', { appId: r.appId, person: r.sub, account: r.wallet!.account });
+  return { account: r.wallet!.account, availableMicroUsd: 0 };
 }
 
 /** The SKU's version valid at `at`, its versions read once per run. */

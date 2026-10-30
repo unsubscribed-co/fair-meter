@@ -804,8 +804,8 @@ function badRequest(req: CallRequest | undefined): string | undefined {
 const PRICE_CACHE_MS = 5 * 60_000;
 /** How long a link is trusted on an instance before `link` reads LINK again (a relink by support, a move). */
 const LINK_CACHE_MS = 5 * 60_000;
-/** The most BALANCE reads a link spends following movedTo, as the wallet's own endOfChain. */
-const MAX_MOVE_HOPS = 50;
+/** The most BALANCE reads a link (or the rollup) spends following movedTo, as the wallet's own endOfChain. */
+export const MAX_MOVE_HOPS = 50;
 
 /** AUTHORIZE_TIMING's facts as authorize goes: the reads' ms, when the reserve began, its sends. */
 type Timing = { readsMs: number; reserving?: number; attempts: number };
