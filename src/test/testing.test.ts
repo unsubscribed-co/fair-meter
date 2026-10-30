@@ -218,6 +218,15 @@ describe.each([
     expect(await m.usage(who('cap'))).toMatchObject({ day: { spentMicroUsd: 880, heldMicroUsd: 0, roomMicroUsd: HELD + 100 - 880 }, month: { spentMicroUsd: 880 } });
   });
 
+  it("usage shows what the person was charged as cost and fee apart (providers 440 + project 440 = 880); an absorbed attempt adds neither", async () => {
+    const m = await linked('apart', 100_000);
+    expect(await m.record((await m.authorize(ask(who('apart')))) as Reservation, usage)).toBe('recorded');
+    expect(await m.record((await m.authorize(ask(who('apart')))) as Reservation, 'unknown')).toBe('recorded');
+    const { day, month } = await m.usage(who('apart'));
+    expect(day).toMatchObject({ spentMicroUsd: 880, costMicroUsd: 440, feeMicroUsd: 440 });
+    expect(month).toMatchObject({ spentMicroUsd: 880, costMicroUsd: 440, feeMicroUsd: 440 });
+  });
+
   it('a release gives the hold plus its fee back to the day', async () => {
     const m = await linked('capback', 100_000, { dailyCapMicroUsd: HELD + 100 });
     expect(await m.record((await m.authorize(ask(who('capback')))) as Reservation, 'not_billed')).toBe('recorded');

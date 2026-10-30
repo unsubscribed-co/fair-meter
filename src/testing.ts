@@ -189,15 +189,18 @@ export class FakeFairMeter implements FairMeterApi {
     const at = this.now();
     const day = this.row(person, utcDay(at));
     const month = this.row(person, utcMonth(at));
+    // Hosted: the charges apart, cost (minus absorbed) and fee, as in FairMeter.
+    const apart = (row: Row) => (this.options.hosted ? { costMicroUsd: row.cost - row.absorbed, feeMicroUsd: row.fee } : {});
     return {
       day: {
+        ...apart(day),
         spentMicroUsd: day.cost - day.absorbed + day.fee,
         heldMicroUsd: Math.max(0, day.committed - day.cost - day.fee),
         capMicroUsd: this.cap,
         roomMicroUsd: Math.max(0, this.cap - day.committed),
         resetsAt: nextUtcDay(at),
       },
-      month: { spentMicroUsd: month.cost - month.absorbed + month.fee, resetsAt: nextUtcMonth(at) },
+      month: { ...apart(month), spentMicroUsd: month.cost - month.absorbed + month.fee, resetsAt: nextUtcMonth(at) },
       tier: this.tier(day.committed),
       readOnly: this.options.actions !== undefined && pastFloor(day.committed, this.cap, this.capFloor(at)),
       ...(this.links.get(person) ? { wallet: { availableMicroUsd: this.available.get(this.links.get(person)!) ?? 0 } } : {}),

@@ -122,10 +122,19 @@ export interface Refusal {
   tier?: BudgetTier;
 }
 
-/** A person's spend for the app to show them: integer micro-USD and ISO times (UTC). */
+/**
+ * Hosted: what the person was charged, apart: `costMicroUsd` went to the providers (list-price cost
+ * minus what was absorbed), `feeMicroUsd` to the project; together `spentMicroUsd`.
+ */
+export interface Charges {
+  costMicroUsd: number;
+  feeMicroUsd: number;
+}
+
+/** A person's spend for the app to show them: integer micro-USD and ISO times (UTC); hosted, in charged amounts. */
 export interface PersonUsage {
-  day: { spentMicroUsd: number; heldMicroUsd: number; capMicroUsd: number; roomMicroUsd: number; resetsAt: string };
-  month: { spentMicroUsd: number; resetsAt: string };
+  day: { spentMicroUsd: number; heldMicroUsd: number; capMicroUsd: number; roomMicroUsd: number; resetsAt: string } & Partial<Charges>;
+  month: { spentMicroUsd: number; resetsAt: string } & Partial<Charges>;
   tier: BudgetTier;
   /** Actions configured and committed above cap - floor: canWrite refuses until the room comes back. */
   readOnly: boolean;
@@ -475,19 +484,23 @@ export class FairMeter {
     const sk = tableKeys().sk;
     const day = rows.find((r) => skOf(r) === dayKey[sk]) ?? {};
     const month = rows.find((r) => skOf(r) === monthKey[sk]) ?? {};
-    // What the person paid: list-price cost minus the part the operator absorbed, plus the fee charged (hosted).
-    const spent = (row: Record<string, unknown>) => Number(row.costMicroUsd ?? 0) - Number(row.absorbedMicroUsd ?? 0) + Number(row.feeMicroUsd ?? 0);
+    // What the person paid: list-price cost minus the part the operator absorbed, plus the fee charged (hosted: apart).
+    const spent = (row: Record<string, unknown>) => {
+      const cost = Number(row.costMicroUsd ?? 0) - Number(row.absorbedMicroUsd ?? 0);
+      const fee = Number(row.feeMicroUsd ?? 0);
+      return { spentMicroUsd: cost + fee, ...(typeof billing === 'object' ? { costMicroUsd: cost, feeMicroUsd: fee } : {}) };
+    };
     const committed = Number(day.committedMicroUsd ?? 0);
     const cap = this.cfg.dailyCapMicroUsd;
     return {
       day: {
-        spentMicroUsd: spent(day),
+        ...spent(day),
         heldMicroUsd: Math.max(0, committed - Number(day.costMicroUsd ?? 0) - Number(day.feeMicroUsd ?? 0)),
         capMicroUsd: cap,
         roomMicroUsd: Math.max(0, cap - committed),
         resetsAt: nextUtcDay(at),
       },
-      month: { spentMicroUsd: spent(month), resetsAt: nextUtcMonth(at) },
+      month: { ...spent(month), resetsAt: nextUtcMonth(at) },
       tier: dayTier(committed, cap, this.cfg.tiers),
       readOnly: this.cfg.actions !== undefined && pastFloor(committed, cap, this.capFloor(at)),
       ...(wallet ? { wallet: { availableMicroUsd: Number(wallet.Item?.availableMicroUsd ?? 0) } } : {}),
