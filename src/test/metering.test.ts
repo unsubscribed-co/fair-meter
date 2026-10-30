@@ -128,6 +128,15 @@ test("the retry Lambda can also read EVENTs and delete PENDING rows (granted her
   for (const action of ['dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:GetItem', 'dynamodb:DeleteItem']) expect(actions).toContain(action);
 });
 
+test.each([
+  ['no actions', {}],
+  ['with actions', { actions: { skus: ['stacksplit-new-expense'] } }],
+])("billing 'none' (the default): the whole template is pinned (%s); hosted billing must never change it", (_, props) => {
+  const { t } = synth(props);
+  const json = JSON.stringify(t.toJSON()).replace(/"[0-9a-f]{64}\.zip"/g, '"<asset>.zip"');
+  expect(JSON.parse(json)).toMatchSnapshot();
+});
+
 test('the DLQ age alarm: a parked record has a week left to be redriven (M3)', () => {
   const app = new cdk.App({ context: { 'aws:cdk:bundling-stacks': [] } });
   const s = new cdk.Stack(app, 'S');

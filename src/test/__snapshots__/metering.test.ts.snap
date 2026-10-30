@@ -562,3 +562,2350 @@ exports[`MeteringRetry with an alarmAction: v0.2.0's template (Nieto's construct
   },
 }
 `;
+
+exports[`billing 'none' (the default): the whole template is pinned (no actions); hosted billing must never change it 1`] = `
+{
+  "Outputs": {
+    "MeteringLedgerTableName4F82016D": {
+      "Description": "stacksplit prod metering ledger table (prices-cli sync --table)",
+      "Value": {
+        "Ref": "MeteringLedger9DE3E277",
+      },
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "ApiF70053CD": {
+      "DependsOn": [
+        "ApiServiceRoleDefaultPolicyB24862FE",
+        "ApiServiceRole1BD550DA",
+      ],
+      "Properties": {
+        "Code": {
+          "ZipFile": "x",
+        },
+        "Environment": {
+          "Variables": {
+            "FAIR_METER": {
+              "Fn::Join": [
+                "",
+                [
+                  "{"appId":"stacksplit","env":"prod","tableName":"",
+                  {
+                    "Ref": "MeteringLedger9DE3E277",
+                  },
+                  "","retryQueueUrl":"",
+                  {
+                    "Ref": "MeteringRetryQueue3A5DFAD4",
+                  },
+                  "","dailyCapMicroUsd":500000,"appDailyCapMicroUsd":5000000}",
+                ],
+              ],
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "ApiLogs3D05D88B",
+          },
+        },
+        "Role": {
+          "Fn::GetAtt": [
+            "ApiServiceRole1BD550DA",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "ApiLogs3D05D88B": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "RetentionInDays": 731,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "ApiServiceRole1BD550DA": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "ApiServiceRoleDefaultPolicyB24862FE": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:BatchGetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryQueue3A5DFAD4",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ApiServiceRoleDefaultPolicyB24862FE",
+        "Roles": [
+          {
+            "Ref": "ApiServiceRole1BD550DA",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "AppTable815C50BC": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "sk",
+            "AttributeType": "S",
+          },
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "sk",
+            "KeyType": "RANGE",
+          },
+        ],
+        "ProvisionedThroughput": {
+          "ReadCapacityUnits": 5,
+          "WriteCapacityUnits": 5,
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "MeteringErrors06B8C4EB3": {
+      "Properties": {
+        "FilterPattern": "?"METER_UNAVAILABLE" ?"PRICE_MISSING" ?"SERVICE_PAUSED" ?"CALL_EXCEEDS_CAP" ?"CALL_ID_REUSED" ?"USAGE_MISSING" ?"RECORD_CONFLICT" ?"USAGE_RECORD_FAILED" ?"RESERVATION_EXCEEDED" ?"USAGE_RECORD_PARKED" ?"ACTION_UNKNOWN" ?"ACTION_UNPRICED" ?"ROLLUP_TRUNCATED" ?"ROLLUP_FAILED" ?"ROLLUP_LATE"",
+        "LogGroupName": {
+          "Ref": "MeteringRetryLogs24C22F52",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "stacksplit-prod-MeteringErrors",
+            "MetricNamespace": "FairMeter",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "MeteringErrors124B8E7A2": {
+      "Properties": {
+        "FilterPattern": "?"METER_UNAVAILABLE" ?"PRICE_MISSING" ?"SERVICE_PAUSED" ?"CALL_EXCEEDS_CAP" ?"CALL_ID_REUSED" ?"USAGE_MISSING" ?"RECORD_CONFLICT" ?"USAGE_RECORD_FAILED" ?"RESERVATION_EXCEEDED" ?"USAGE_RECORD_PARKED" ?"ACTION_UNKNOWN" ?"ACTION_UNPRICED" ?"ROLLUP_TRUNCATED" ?"ROLLUP_FAILED" ?"ROLLUP_LATE"",
+        "LogGroupName": {
+          "Ref": "MeteringRetryRedriveLogsA20B0BAD",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "stacksplit-prod-MeteringErrors",
+            "MetricNamespace": "FairMeter",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "MeteringErrors2ECCE1654": {
+      "Properties": {
+        "FilterPattern": "?"METER_UNAVAILABLE" ?"PRICE_MISSING" ?"SERVICE_PAUSED" ?"CALL_EXCEEDS_CAP" ?"CALL_ID_REUSED" ?"USAGE_MISSING" ?"RECORD_CONFLICT" ?"USAGE_RECORD_FAILED" ?"RESERVATION_EXCEEDED" ?"USAGE_RECORD_PARKED" ?"ACTION_UNKNOWN" ?"ACTION_UNPRICED" ?"ROLLUP_TRUNCATED" ?"ROLLUP_FAILED" ?"ROLLUP_LATE"",
+        "LogGroupName": {
+          "Ref": "ApiLogs3D05D88B",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "stacksplit-prod-MeteringErrors",
+            "MetricNamespace": "FairMeter",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "MeteringErrorsAlarm61973B61": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "stacksplit prod: a metering error (METER_UNAVAILABLE, PRICE_MISSING, SERVICE_PAUSED, CALL_EXCEEDS_CAP, CALL_ID_REUSED, USAGE_MISSING, RECORD_CONFLICT, USAGE_RECORD_FAILED, RESERVATION_EXCEEDED, USAGE_RECORD_PARKED, ACTION_UNKNOWN, ACTION_UNPRICED, ROLLUP_TRUNCATED, ROLLUP_FAILED, ROLLUP_LATE): check the app function's logs",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "stacksplit-prod-MeteringErrors",
+        "Namespace": "FairMeter",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringLedger9DE3E277": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "PK",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "SK",
+            "AttributeType": "S",
+          },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "DeletionProtectionEnabled": true,
+        "KeySchema": [
+          {
+            "AttributeName": "PK",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "SK",
+            "KeyType": "RANGE",
+          },
+        ],
+        "PointInTimeRecoverySpecification": {
+          "PointInTimeRecoveryEnabled": true,
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "expiresAt",
+          "Enabled": true,
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "MeteringRetryDlq507F1204": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringRetryDlqAgeAlarmB97A10AA": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "A usage record has waited 7 days in the metering DLQ; it is dropped at 14: fix, then redrive",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "MeteringRetryDlq507F1204",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Namespace": "AWS/SQS",
+        "Period": 3600,
+        "Statistic": "Maximum",
+        "Threshold": 604800,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringRetryDlqAlarm3B031620": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "Usage records could not be recorded after retries: check the metering DLQ, fix, then redrive",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "MeteringRetryDlq507F1204",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringRetryDlqPolicyAE0AC7DA": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryDlq507F1204",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "MeteringRetryDlq507F1204",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "MeteringRetryFn6B73D340": {
+      "DependsOn": [
+        "MeteringRetryFnServiceRoleDefaultPolicy005DDA0D",
+        "MeteringRetryFnServiceRole5AAE05C7",
+      ],
+      "Properties": {
+        "Architectures": [
+          "arm64",
+        ],
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "DLQ_URL": {
+              "Ref": "MeteringRetryDlq507F1204",
+            },
+            "NODE_OPTIONS": "--enable-source-maps",
+            "TABLE_NAME": {
+              "Ref": "MeteringLedger9DE3E277",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogFormat": "JSON",
+          "LogGroup": {
+            "Ref": "MeteringRetryLogs24C22F52",
+          },
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "MeteringRetryFnServiceRole5AAE05C7",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 10,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "MeteringRetryFnServiceRole5AAE05C7": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "MeteringRetryFnServiceRoleDefaultPolicy005DDA0D": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryQueue3A5DFAD4",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryDlq507F1204",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:DeleteItem",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "MeteringRetryFnServiceRoleDefaultPolicy005DDA0D",
+        "Roles": [
+          {
+            "Ref": "MeteringRetryFnServiceRole5AAE05C7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "MeteringRetryFnSqsEventSourceSMeteringRetryQueueCA28FB51DC95ED6E": {
+      "Properties": {
+        "BatchSize": 10,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "MeteringRetryQueue3A5DFAD4",
+            "Arn",
+          ],
+        },
+        "FunctionName": {
+          "Ref": "MeteringRetryFn6B73D340",
+        },
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures",
+        ],
+      },
+      "Type": "AWS::Lambda::EventSourceMapping",
+    },
+    "MeteringRetryLogs24C22F52": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringRetryQueue3A5DFAD4": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 345600,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "MeteringRetryDlq507F1204",
+              "Arn",
+            ],
+          },
+          "maxReceiveCount": 10,
+        },
+        "SqsManagedSseEnabled": true,
+        "VisibilityTimeout": 60,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringRetryQueuePolicyBFD24EE8": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryQueue3A5DFAD4",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "MeteringRetryQueue3A5DFAD4",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "MeteringRetryRedrive25FF8D0F": {
+      "DependsOn": [
+        "MeteringRetryRedriveServiceRoleDefaultPolicy9512E4D3",
+        "MeteringRetryRedriveServiceRoleE509BFE3",
+      ],
+      "Properties": {
+        "Architectures": [
+          "arm64",
+        ],
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "DLQ_URL": {
+              "Ref": "MeteringRetryDlq507F1204",
+            },
+            "NODE_OPTIONS": "--enable-source-maps",
+            "QUEUE_URL": {
+              "Ref": "MeteringRetryQueue3A5DFAD4",
+            },
+            "TABLE_NAME": {
+              "Ref": "MeteringLedger9DE3E277",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogFormat": "JSON",
+          "LogGroup": {
+            "Ref": "MeteringRetryRedriveLogsA20B0BAD",
+          },
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "MeteringRetryRedriveServiceRoleE509BFE3",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 300,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "MeteringRetryRedriveLogsA20B0BAD": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringRetryRedriveSchedule22317A31": {
+      "Properties": {
+        "Description": "Put valid usage records parked in the metering DLQ back on the retry queue",
+        "ScheduleExpression": "cron(0 4 * * ? *)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "MeteringRetryRedrive25FF8D0F",
+                "Arn",
+              ],
+            },
+            "Id": "Target0",
+            "RetryPolicy": {
+              "MaximumRetryAttempts": 2,
+            },
+          },
+        ],
+      },
+      "Type": "AWS::Events::Rule",
+    },
+    "MeteringRetryRedriveScheduleAllowEventRuleSMeteringRetryRedriveEAC2716803A50A88": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "MeteringRetryRedrive25FF8D0F",
+            "Arn",
+          ],
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "MeteringRetryRedriveSchedule22317A31",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "MeteringRetryRedriveServiceRoleDefaultPolicy9512E4D3": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:UpdateItem",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryDlq507F1204",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryQueue3A5DFAD4",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "MeteringRetryRedriveServiceRoleDefaultPolicy9512E4D3",
+        "Roles": [
+          {
+            "Ref": "MeteringRetryRedriveServiceRoleE509BFE3",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "MeteringRetryRedriveServiceRoleE509BFE3": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "MeteringSweeper44EC3E9F": {
+      "DependsOn": [
+        "MeteringSweeperServiceRoleDefaultPolicyA03E2535",
+        "MeteringSweeperServiceRole95A1B600",
+      ],
+      "Properties": {
+        "Architectures": [
+          "arm64",
+        ],
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "FAIR_METER": {
+              "Fn::Join": [
+                "",
+                [
+                  "{"appId":"stacksplit","env":"prod","tableName":"",
+                  {
+                    "Ref": "MeteringLedger9DE3E277",
+                  },
+                  "","retryQueueUrl":"",
+                  {
+                    "Ref": "MeteringRetryQueue3A5DFAD4",
+                  },
+                  "","dailyCapMicroUsd":500000,"appDailyCapMicroUsd":5000000}",
+                ],
+              ],
+            },
+            "NODE_OPTIONS": "--enable-source-maps",
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogFormat": "JSON",
+          "LogGroup": {
+            "Ref": "MeteringSweeperLogs31A76FBB",
+          },
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "MeteringSweeperServiceRole95A1B600",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 60,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "MeteringSweeperFailureAlarmE3D4290F": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "stacksplit prod: the metering sweeper failed; open reservations stay held until it runs: check its logs",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "MeteringSweeper44EC3E9F",
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 600,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringSweeperLogs31A76FBB": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringSweeperSchedule23D69ECF": {
+      "Properties": {
+        "Description": "Settle stacksplit reservations left open for 30 minutes",
+        "ScheduleExpression": "rate(10 minutes)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "MeteringSweeper44EC3E9F",
+                "Arn",
+              ],
+            },
+            "Id": "Target0",
+            "RetryPolicy": {
+              "MaximumRetryAttempts": 2,
+            },
+          },
+        ],
+      },
+      "Type": "AWS::Events::Rule",
+    },
+    "MeteringSweeperScheduleAllowEventRuleSMeteringSweeper6D77B6C88F892801": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "MeteringSweeper44EC3E9F",
+            "Arn",
+          ],
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "MeteringSweeperSchedule23D69ECF",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "MeteringSweeperServiceRole95A1B600": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "MeteringSweeperServiceRoleDefaultPolicyA03E2535": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "MeteringSweeperServiceRoleDefaultPolicyA03E2535",
+        "Roles": [
+          {
+            "Ref": "MeteringSweeperServiceRole95A1B600",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "MeteringSweptAlarm0C04934E": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "stacksplit prod: the sweeper settled a call at its reservation (a crash or a missing record): check SETTLED_BY_SWEEPER in its logs",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "stacksplit-prod-SettledBySweeper",
+        "Namespace": "FairMeter",
+        "Period": 600,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringSweptFilterE8A10BE6": {
+      "Properties": {
+        "FilterPattern": ""SETTLED_BY_SWEEPER"",
+        "LogGroupName": {
+          "Ref": "MeteringSweeperLogs31A76FBB",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "stacksplit-prod-SettledBySweeper",
+            "MetricNamespace": "FairMeter",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
+
+exports[`billing 'none' (the default): the whole template is pinned (with actions); hosted billing must never change it 1`] = `
+{
+  "Outputs": {
+    "MeteringLedgerTableName4F82016D": {
+      "Description": "stacksplit prod metering ledger table (prices-cli sync --table)",
+      "Value": {
+        "Ref": "MeteringLedger9DE3E277",
+      },
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "ApiF70053CD": {
+      "DependsOn": [
+        "ApiServiceRoleDefaultPolicyB24862FE",
+        "ApiServiceRole1BD550DA",
+      ],
+      "Properties": {
+        "Code": {
+          "ZipFile": "x",
+        },
+        "Environment": {
+          "Variables": {
+            "FAIR_METER": {
+              "Fn::Join": [
+                "",
+                [
+                  "{"appId":"stacksplit","env":"prod","tableName":"",
+                  {
+                    "Ref": "MeteringLedger9DE3E277",
+                  },
+                  "","retryQueueUrl":"",
+                  {
+                    "Ref": "MeteringRetryQueue3A5DFAD4",
+                  },
+                  "","dailyCapMicroUsd":500000,"appDailyCapMicroUsd":5000000,"actions":{"skus":["stacksplit-new-expense"],"perPersonPerMinute":20,"maxConcurrency":10},"actionFloorMicroUsd":45000}",
+                ],
+              ],
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "ApiLogs3D05D88B",
+          },
+        },
+        "Role": {
+          "Fn::GetAtt": [
+            "ApiServiceRole1BD550DA",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "ApiLogs3D05D88B": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "RetentionInDays": 731,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "ApiServiceRole1BD550DA": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "ApiServiceRoleDefaultPolicyB24862FE": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:BatchGetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryQueue3A5DFAD4",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ApiServiceRoleDefaultPolicyB24862FE",
+        "Roles": [
+          {
+            "Ref": "ApiServiceRole1BD550DA",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "AppTable815C50BC": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "sk",
+            "AttributeType": "S",
+          },
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "sk",
+            "KeyType": "RANGE",
+          },
+        ],
+        "ProvisionedThroughput": {
+          "ReadCapacityUnits": 5,
+          "WriteCapacityUnits": 5,
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "MeteringErrors06B8C4EB3": {
+      "Properties": {
+        "FilterPattern": "?"METER_UNAVAILABLE" ?"PRICE_MISSING" ?"SERVICE_PAUSED" ?"CALL_EXCEEDS_CAP" ?"CALL_ID_REUSED" ?"USAGE_MISSING" ?"RECORD_CONFLICT" ?"USAGE_RECORD_FAILED" ?"RESERVATION_EXCEEDED" ?"USAGE_RECORD_PARKED" ?"ACTION_UNKNOWN" ?"ACTION_UNPRICED" ?"ROLLUP_TRUNCATED" ?"ROLLUP_FAILED" ?"ROLLUP_LATE"",
+        "LogGroupName": {
+          "Ref": "MeteringRetryLogs24C22F52",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "stacksplit-prod-MeteringErrors",
+            "MetricNamespace": "FairMeter",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "MeteringErrors124B8E7A2": {
+      "Properties": {
+        "FilterPattern": "?"METER_UNAVAILABLE" ?"PRICE_MISSING" ?"SERVICE_PAUSED" ?"CALL_EXCEEDS_CAP" ?"CALL_ID_REUSED" ?"USAGE_MISSING" ?"RECORD_CONFLICT" ?"USAGE_RECORD_FAILED" ?"RESERVATION_EXCEEDED" ?"USAGE_RECORD_PARKED" ?"ACTION_UNKNOWN" ?"ACTION_UNPRICED" ?"ROLLUP_TRUNCATED" ?"ROLLUP_FAILED" ?"ROLLUP_LATE"",
+        "LogGroupName": {
+          "Ref": "MeteringRetryRedriveLogsA20B0BAD",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "stacksplit-prod-MeteringErrors",
+            "MetricNamespace": "FairMeter",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "MeteringErrors2ECCE1654": {
+      "Properties": {
+        "FilterPattern": "?"METER_UNAVAILABLE" ?"PRICE_MISSING" ?"SERVICE_PAUSED" ?"CALL_EXCEEDS_CAP" ?"CALL_ID_REUSED" ?"USAGE_MISSING" ?"RECORD_CONFLICT" ?"USAGE_RECORD_FAILED" ?"RESERVATION_EXCEEDED" ?"USAGE_RECORD_PARKED" ?"ACTION_UNKNOWN" ?"ACTION_UNPRICED" ?"ROLLUP_TRUNCATED" ?"ROLLUP_FAILED" ?"ROLLUP_LATE"",
+        "LogGroupName": {
+          "Ref": "MeteringRollupLogs74E4EC71",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "stacksplit-prod-MeteringErrors",
+            "MetricNamespace": "FairMeter",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "MeteringErrors311F7109D": {
+      "Properties": {
+        "FilterPattern": "?"METER_UNAVAILABLE" ?"PRICE_MISSING" ?"SERVICE_PAUSED" ?"CALL_EXCEEDS_CAP" ?"CALL_ID_REUSED" ?"USAGE_MISSING" ?"RECORD_CONFLICT" ?"USAGE_RECORD_FAILED" ?"RESERVATION_EXCEEDED" ?"USAGE_RECORD_PARKED" ?"ACTION_UNKNOWN" ?"ACTION_UNPRICED" ?"ROLLUP_TRUNCATED" ?"ROLLUP_FAILED" ?"ROLLUP_LATE"",
+        "LogGroupName": {
+          "Ref": "ApiLogs3D05D88B",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "stacksplit-prod-MeteringErrors",
+            "MetricNamespace": "FairMeter",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "MeteringErrorsAlarm61973B61": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "stacksplit prod: a metering error (METER_UNAVAILABLE, PRICE_MISSING, SERVICE_PAUSED, CALL_EXCEEDS_CAP, CALL_ID_REUSED, USAGE_MISSING, RECORD_CONFLICT, USAGE_RECORD_FAILED, RESERVATION_EXCEEDED, USAGE_RECORD_PARKED, ACTION_UNKNOWN, ACTION_UNPRICED, ROLLUP_TRUNCATED, ROLLUP_FAILED, ROLLUP_LATE) or a failed rollup run: check the app function's logs",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "Metrics": [
+          {
+            "Expression": "FILL(errors, 0) + FILL(rollupFailures, 0)",
+            "Id": "expr_1",
+            "ReturnData": true,
+          },
+          {
+            "Id": "errors",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "stacksplit-prod-MeteringErrors",
+                "Namespace": "FairMeter",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "rollupFailures",
+            "MetricStat": {
+              "Metric": {
+                "Dimensions": [
+                  {
+                    "Name": "FunctionName",
+                    "Value": {
+                      "Ref": "MeteringRollup8C8E010F",
+                    },
+                  },
+                ],
+                "MetricName": "Errors",
+                "Namespace": "AWS/Lambda",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringLedger9DE3E277": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "PK",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "SK",
+            "AttributeType": "S",
+          },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "DeletionProtectionEnabled": true,
+        "KeySchema": [
+          {
+            "AttributeName": "PK",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "SK",
+            "KeyType": "RANGE",
+          },
+        ],
+        "PointInTimeRecoverySpecification": {
+          "PointInTimeRecoveryEnabled": true,
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "expiresAt",
+          "Enabled": true,
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "MeteringRetryDlq507F1204": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringRetryDlqAgeAlarmB97A10AA": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "A usage record has waited 7 days in the metering DLQ; it is dropped at 14: fix, then redrive",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "MeteringRetryDlq507F1204",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Namespace": "AWS/SQS",
+        "Period": 3600,
+        "Statistic": "Maximum",
+        "Threshold": 604800,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringRetryDlqAlarm3B031620": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "Usage records could not be recorded after retries: check the metering DLQ, fix, then redrive",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "MeteringRetryDlq507F1204",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringRetryDlqPolicyAE0AC7DA": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryDlq507F1204",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "MeteringRetryDlq507F1204",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "MeteringRetryFn6B73D340": {
+      "DependsOn": [
+        "MeteringRetryFnServiceRoleDefaultPolicy005DDA0D",
+        "MeteringRetryFnServiceRole5AAE05C7",
+      ],
+      "Properties": {
+        "Architectures": [
+          "arm64",
+        ],
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "DLQ_URL": {
+              "Ref": "MeteringRetryDlq507F1204",
+            },
+            "NODE_OPTIONS": "--enable-source-maps",
+            "TABLE_NAME": {
+              "Ref": "MeteringLedger9DE3E277",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogFormat": "JSON",
+          "LogGroup": {
+            "Ref": "MeteringRetryLogs24C22F52",
+          },
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "MeteringRetryFnServiceRole5AAE05C7",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 10,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "MeteringRetryFnServiceRole5AAE05C7": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "MeteringRetryFnServiceRoleDefaultPolicy005DDA0D": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryQueue3A5DFAD4",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryDlq507F1204",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:DeleteItem",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "MeteringRetryFnServiceRoleDefaultPolicy005DDA0D",
+        "Roles": [
+          {
+            "Ref": "MeteringRetryFnServiceRole5AAE05C7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "MeteringRetryFnSqsEventSourceSMeteringRetryQueueCA28FB51DC95ED6E": {
+      "Properties": {
+        "BatchSize": 10,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "MeteringRetryQueue3A5DFAD4",
+            "Arn",
+          ],
+        },
+        "FunctionName": {
+          "Ref": "MeteringRetryFn6B73D340",
+        },
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures",
+        ],
+      },
+      "Type": "AWS::Lambda::EventSourceMapping",
+    },
+    "MeteringRetryLogs24C22F52": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringRetryQueue3A5DFAD4": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 345600,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "MeteringRetryDlq507F1204",
+              "Arn",
+            ],
+          },
+          "maxReceiveCount": 10,
+        },
+        "SqsManagedSseEnabled": true,
+        "VisibilityTimeout": 60,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringRetryQueuePolicyBFD24EE8": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryQueue3A5DFAD4",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "MeteringRetryQueue3A5DFAD4",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "MeteringRetryRedrive25FF8D0F": {
+      "DependsOn": [
+        "MeteringRetryRedriveServiceRoleDefaultPolicy9512E4D3",
+        "MeteringRetryRedriveServiceRoleE509BFE3",
+      ],
+      "Properties": {
+        "Architectures": [
+          "arm64",
+        ],
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "DLQ_URL": {
+              "Ref": "MeteringRetryDlq507F1204",
+            },
+            "NODE_OPTIONS": "--enable-source-maps",
+            "QUEUE_URL": {
+              "Ref": "MeteringRetryQueue3A5DFAD4",
+            },
+            "TABLE_NAME": {
+              "Ref": "MeteringLedger9DE3E277",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogFormat": "JSON",
+          "LogGroup": {
+            "Ref": "MeteringRetryRedriveLogsA20B0BAD",
+          },
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "MeteringRetryRedriveServiceRoleE509BFE3",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 300,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "MeteringRetryRedriveLogsA20B0BAD": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringRetryRedriveSchedule22317A31": {
+      "Properties": {
+        "Description": "Put valid usage records parked in the metering DLQ back on the retry queue",
+        "ScheduleExpression": "cron(0 4 * * ? *)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "MeteringRetryRedrive25FF8D0F",
+                "Arn",
+              ],
+            },
+            "Id": "Target0",
+            "RetryPolicy": {
+              "MaximumRetryAttempts": 2,
+            },
+          },
+        ],
+      },
+      "Type": "AWS::Events::Rule",
+    },
+    "MeteringRetryRedriveScheduleAllowEventRuleSMeteringRetryRedriveEAC2716803A50A88": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "MeteringRetryRedrive25FF8D0F",
+            "Arn",
+          ],
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "MeteringRetryRedriveSchedule22317A31",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "MeteringRetryRedriveServiceRoleDefaultPolicy9512E4D3": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:UpdateItem",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryDlq507F1204",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "MeteringRetryQueue3A5DFAD4",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "MeteringRetryRedriveServiceRoleDefaultPolicy9512E4D3",
+        "Roles": [
+          {
+            "Ref": "MeteringRetryRedriveServiceRoleE509BFE3",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "MeteringRetryRedriveServiceRoleE509BFE3": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "MeteringRollup8C8E010F": {
+      "DependsOn": [
+        "MeteringRollupServiceRoleDefaultPolicyB8E0AEBF",
+        "MeteringRollupServiceRole27A36D97",
+      ],
+      "Properties": {
+        "Architectures": [
+          "arm64",
+        ],
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "FAIR_METER": {
+              "Fn::Join": [
+                "",
+                [
+                  "{"appId":"stacksplit","env":"prod","tableName":"",
+                  {
+                    "Ref": "MeteringLedger9DE3E277",
+                  },
+                  "","retryQueueUrl":"",
+                  {
+                    "Ref": "MeteringRetryQueue3A5DFAD4",
+                  },
+                  "","dailyCapMicroUsd":500000,"appDailyCapMicroUsd":5000000,"actions":{"skus":["stacksplit-new-expense"],"perPersonPerMinute":20,"maxConcurrency":10},"actionFloorMicroUsd":45000}",
+                ],
+              ],
+            },
+            "LOG_GROUPS": {
+              "Ref": "ApiLogs3D05D88B",
+            },
+            "NODE_OPTIONS": "--enable-source-maps",
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogFormat": "JSON",
+          "LogGroup": {
+            "Ref": "MeteringRollupLogs74E4EC71",
+          },
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "MeteringRollupServiceRole27A36D97",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 300,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "MeteringRollupLogs74E4EC71": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringRollupSchedule4BA75B62": {
+      "Properties": {
+        "Description": "Charge stacksplit action lines per person, SKU and 15-minute window",
+        "ScheduleExpression": "cron(0/15 * * * ? *)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "MeteringRollup8C8E010F",
+                "Arn",
+              ],
+            },
+            "Id": "Target0",
+            "RetryPolicy": {
+              "MaximumRetryAttempts": 2,
+            },
+          },
+        ],
+      },
+      "Type": "AWS::Events::Rule",
+    },
+    "MeteringRollupScheduleAllowEventRuleSMeteringRollupD181E5B0D8C84250": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "MeteringRollup8C8E010F",
+            "Arn",
+          ],
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "MeteringRollupSchedule4BA75B62",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "MeteringRollupServiceRole27A36D97": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "MeteringRollupServiceRoleDefaultPolicyB8E0AEBF": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "logs:GetQueryResults",
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": "logs:StartQuery",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ApiLogs3D05D88B",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "MeteringRollupServiceRoleDefaultPolicyB8E0AEBF",
+        "Roles": [
+          {
+            "Ref": "MeteringRollupServiceRole27A36D97",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "MeteringSweeper44EC3E9F": {
+      "DependsOn": [
+        "MeteringSweeperServiceRoleDefaultPolicyA03E2535",
+        "MeteringSweeperServiceRole95A1B600",
+      ],
+      "Properties": {
+        "Architectures": [
+          "arm64",
+        ],
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "FAIR_METER": {
+              "Fn::Join": [
+                "",
+                [
+                  "{"appId":"stacksplit","env":"prod","tableName":"",
+                  {
+                    "Ref": "MeteringLedger9DE3E277",
+                  },
+                  "","retryQueueUrl":"",
+                  {
+                    "Ref": "MeteringRetryQueue3A5DFAD4",
+                  },
+                  "","dailyCapMicroUsd":500000,"appDailyCapMicroUsd":5000000,"actions":{"skus":["stacksplit-new-expense"],"perPersonPerMinute":20,"maxConcurrency":10},"actionFloorMicroUsd":45000}",
+                ],
+              ],
+            },
+            "NODE_OPTIONS": "--enable-source-maps",
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogFormat": "JSON",
+          "LogGroup": {
+            "Ref": "MeteringSweeperLogs31A76FBB",
+          },
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "MeteringSweeperServiceRole95A1B600",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs24.x",
+        "Timeout": 60,
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "MeteringSweeperFailureAlarmE3D4290F": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "stacksplit prod: the metering sweeper failed; open reservations stay held until it runs: check its logs",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "MeteringSweeper44EC3E9F",
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 600,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringSweeperLogs31A76FBB": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "MeteringSweeperSchedule23D69ECF": {
+      "Properties": {
+        "Description": "Settle stacksplit reservations left open for 30 minutes",
+        "ScheduleExpression": "rate(10 minutes)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "MeteringSweeper44EC3E9F",
+                "Arn",
+              ],
+            },
+            "Id": "Target0",
+            "RetryPolicy": {
+              "MaximumRetryAttempts": 2,
+            },
+          },
+        ],
+      },
+      "Type": "AWS::Events::Rule",
+    },
+    "MeteringSweeperScheduleAllowEventRuleSMeteringSweeper6D77B6C88F892801": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "MeteringSweeper44EC3E9F",
+            "Arn",
+          ],
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "MeteringSweeperSchedule23D69ECF",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "MeteringSweeperServiceRole95A1B600": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "MeteringSweeperServiceRoleDefaultPolicyA03E2535": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "MeteringLedger9DE3E277",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "MeteringSweeperServiceRoleDefaultPolicyA03E2535",
+        "Roles": [
+          {
+            "Ref": "MeteringSweeperServiceRole95A1B600",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "MeteringSweptAlarm0C04934E": {
+      "Properties": {
+        "AlarmActions": [
+          "arn:aws:sns:us-east-2:111111111111:a",
+        ],
+        "AlarmDescription": "stacksplit prod: the sweeper settled a call at its reservation (a crash or a missing record): check SETTLED_BY_SWEEPER in its logs",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "stacksplit-prod-SettledBySweeper",
+        "Namespace": "FairMeter",
+        "Period": 600,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "MeteringSweptFilterE8A10BE6": {
+      "Properties": {
+        "FilterPattern": ""SETTLED_BY_SWEEPER"",
+        "LogGroupName": {
+          "Ref": "MeteringSweeperLogs31A76FBB",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "stacksplit-prod-SettledBySweeper",
+            "MetricNamespace": "FairMeter",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
