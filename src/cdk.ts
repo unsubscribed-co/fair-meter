@@ -587,6 +587,8 @@ export interface MeteringProps {
   appDailyCapUsd: string;
   /** Every app in the table per UTC day, decimal USD: a soft breaker. */
   allAppsDailyCapUsd?: string;
+  /** This app's absorbed no_usage cost per UTC day, decimal USD, past which its AI calls pause until cleared (default "1"). */
+  noUsageDailyCapUsd?: string;
   /** Calls per person per UTC minute (a brake against loops). */
   maxCallsPerMinute?: number;
   tiers?: TierThresholds;
@@ -744,6 +746,7 @@ export class Metering extends Construct {
       dailyCapMicroUsd,
       appDailyCapMicroUsd,
       ...(props.allAppsDailyCapUsd !== undefined ? { allAppsDailyCapMicroUsd: cap('allAppsDailyCapUsd', props.allAppsDailyCapUsd) } : {}),
+      ...(props.noUsageDailyCapUsd !== undefined ? { noUsageDailyCapMicroUsd: cap('noUsageDailyCapUsd', props.noUsageDailyCapUsd) } : {}),
       ...(props.maxCallsPerMinute !== undefined ? { maxCallsPerMinute: props.maxCallsPerMinute } : {}),
       ...(props.tiers ? { tiers: props.tiers } : {}),
       ...(actions ? { actions, actionFloorMicroUsd } : {}),

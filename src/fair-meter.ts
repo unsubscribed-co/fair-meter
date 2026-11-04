@@ -40,6 +40,11 @@ export interface FairMeterConfig {
   allAppsDailyCapMicroUsd?: number;
   /** Optional per-person brake against loops (calls per UTC minute). */
   maxCallsPerMinute?: number;
+  /**
+   * The app's absorbed no_usage cost per UTC day past which its AI calls pause until an operator
+   * clears them (README, "When the provider reports no usage"). Default NO_USAGE_DAILY_CAP_MICRO_USD.
+   */
+  noUsageDailyCapMicroUsd?: number;
   /** Budget tier thresholds; default 75/90. */
   tiers?: TierThresholds;
   /**
@@ -191,6 +196,7 @@ function readConfig(config?: FairMeterConfig): FairMeterConfig {
   }
   if (c.allAppsDailyCapMicroUsd !== undefined && !positive(c.allAppsDailyCapMicroUsd)) throw new Error('FairMeter: allAppsDailyCapMicroUsd must be a positive integer');
   if (c.maxCallsPerMinute !== undefined && !positive(c.maxCallsPerMinute)) throw new Error('FairMeter: maxCallsPerMinute must be a positive integer');
+  if (c.noUsageDailyCapMicroUsd !== undefined && !positive(c.noUsageDailyCapMicroUsd)) throw new Error('FairMeter: noUsageDailyCapMicroUsd must be a positive integer');
   if (c.tiers) assertTierThresholds(c.tiers);
   if (c.tableKeys) setTableKeys(c.tableKeys);
   if (c.actions) {
@@ -290,6 +296,7 @@ export class FairMeter {
         this.get(keys.appDay(appId, day)),
         this.cfg.allAppsDailyCapMicroUsd === undefined ? undefined : this.get(keys.globalDay(day)),
         this.meter.brake(req.person, at),
+        this.get(keys.appPause(appId)),
       ]);
     } catch (err) {
       console.error('METER_UNAVAILABLE', { ...log, err });
@@ -297,7 +304,7 @@ export class FairMeter {
     } finally {
       timing.readsMs = Date.now() - reading;
     }
-    const [found, userDay, appDay, allAppsDay, retryAfterSeconds] = read;
+    const [found, userDay, appDay, allAppsDay, retryAfterSeconds, pause] = read;
     const price = found?.item;
     const shape = price && priceShape(price);
     if (!found || !shape || (shape === 'tokens' && !isProvider(price.provider))) {
@@ -311,12 +318,13 @@ export class FairMeter {
     const tier = tierAt(committed);
     const appSpent = Number(appDay?.costMicroUsd ?? 0);
     const allSpent = Number(allAppsDay?.costMicroUsd ?? 0);
-    const paused = this.cfg.allAppsDailyCapMicroUsd !== undefined && allSpent >= this.cfg.allAppsDailyCapMicroUsd ? 'all_apps_daily_cap'
+    const paused = pause ? 'no_usage_cap'
+      : this.cfg.allAppsDailyCapMicroUsd !== undefined && allSpent >= this.cfg.allAppsDailyCapMicroUsd ? 'all_apps_daily_cap'
       : appSpent >= this.cfg.appDailyCapMicroUsd ? 'app_daily_cap' : undefined;
     if (paused) {
-      // Alarmed; calls resume on their own at 00:00 UTC.
+      // Alarmed; the breakers lift on their own at 00:00 UTC, the no_usage pause only when an operator clears it.
       console.error('SERVICE_PAUSED', { ...log, reason: paused, appSpent, allSpent });
-      return refuse(503, 'service_paused', { resetsAt: nextUtcDay(at) }, tier);
+      return refuse(503, 'service_paused', paused === 'no_usage_cap' ? {} : { resetsAt: nextUtcDay(at) }, tier);
     }
     const reserved = reserveCost(price, req.max, at);
     if (reserved === undefined) {
@@ -434,7 +442,9 @@ export class FairMeter {
     }
     for (let attempt = 0; ; attempt++) {
       try {
-        return await recordUsage(this.ddb, this.cfg.tableName, r);
+        const outcome = await recordUsage(this.ddb, this.cfg.tableName, r);
+        if (outcome === 'recorded' && r.estimated === 'no_usage') await this.pauseIfNoUsageCap(r.requestTime.slice(0, 10));
+        return outcome;
       } catch (err) {
         const conflicted = (err as { CancellationReasons?: { Code?: string }[] }).CancellationReasons?.some((c) => c.Code === 'TransactionConflict');
         if (conflicted && attempt < 2) {
@@ -451,6 +461,24 @@ export class FairMeter {
           return 'failed';
         }
       }
+    }
+  }
+
+  /**
+   * Past the app's no_usage cap for `day`, writes APP#<app> PAUSED, which authorize refuses on until
+   * an operator deletes it. Checked after each inline no_usage settle; one deferred to the retry
+   * queue still counts toward the next. Never throws.
+   */
+  private async pauseIfNoUsageCap(day: string) {
+    const { appId } = this.cfg;
+    try {
+      const noUsage = Number((await this.get(keys.appDay(appId, day)))?.noUsageMicroUsd ?? 0);
+      const cap = this.cfg.noUsageDailyCapMicroUsd ?? NO_USAGE_DAILY_CAP_MICRO_USD;
+      if (noUsage < cap) return;
+      await this.ddb.send(new PutCommand({ TableName: this.cfg.tableName, Item: { ...keys.appPause(appId), reason: 'no_usage_cap', day, noUsageMicroUsd: noUsage, pausedAt: this.now().toISOString(), env: this.cfg.env } }));
+      console.error('SERVICE_PAUSED', { appId, reason: 'no_usage_cap', day, noUsageMicroUsd: noUsage, capMicroUsd: cap });
+    } catch (err) {
+      console.error('METER_UNAVAILABLE', { appId, reason: 'the no_usage cap could not be checked', err });
     }
   }
 
@@ -809,6 +837,8 @@ function badRequest(req: CallRequest | undefined): string | undefined {
 }
 
 const PRICE_CACHE_MS = 5 * 60_000;
+/** USD 1: an app's absorbed no_usage cost per UTC day before its AI calls pause (Juan, 2026-11-03). */
+export const NO_USAGE_DAILY_CAP_MICRO_USD = 1_000_000;
 /** How long a link is trusted on an instance before `link` reads LINK again (a relink by support, a move). */
 const LINK_CACHE_MS = 5 * 60_000;
 /** The most BALANCE reads a link (or the rollup) spends following movedTo, as the wallet's own endOfChain. */

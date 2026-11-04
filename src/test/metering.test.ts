@@ -220,6 +220,11 @@ test('the export gains env, paidBy, estimated and reservedMicroUsd at the end of
   expect(row).toMatchObject({ env: 'prod', paidBy: 'credit', estimated: 'swept', reservedMicroUsd: 9 });
 });
 
+test("noUsageDailyCapUsd goes into the config only when given (FairMeter's default is USD 1)", () => {
+  expect(synth({ noUsageDailyCapUsd: '0.25' }).metering.config.noUsageDailyCapMicroUsd).toBe(250_000);
+  expect(synth().metering.config).not.toHaveProperty('noUsageDailyCapMicroUsd');
+});
+
 describe('hosted billing: { walletTable }', () => {
   const WALLET_ARN = 'arn:aws:dynamodb:us-east-2:111111111111:table/wallet';
   function hosted() {

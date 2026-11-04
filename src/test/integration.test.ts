@@ -1,5 +1,5 @@
 import { CreateTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { mockClient } from 'aws-sdk-client-mock';
 import { FairMeter, type CallRequest, type FairMeterConfig, type Reservation } from '../fair-meter';
@@ -167,6 +167,25 @@ suite('★ FairMeter against DynamoDB Local', () => {
     // The app's day adds up what it absorbed this way, for the ceiling.
     expect(await get('APP#stacksplit', 'DAILY#2026-11-03')).toMatchObject({ noUsageMicroUsd: expect.any(Number) });
     expect(console.error).toHaveBeenCalledWith('USAGE_MISSING', expect.anything());
+  });
+
+  test("the no_usage ceiling: past the app's absorbed no_usage cost for the day, its AI calls pause until an operator deletes APP#<app> PAUSED, past midnight too", async () => {
+    const m = meter({ appId: 'nousage', noUsageDailyCapMicroUsd: 2 * RESERVED });
+    const absorbOne = async (person: string) => expect(await m.record((await m.authorize(ask(person))) as Reservation, undefined)).toBe('recorded');
+    await absorbOne('cap1@x.co');
+    expect((await m.authorize(ask('cap2@x.co'))).ok).toBe(true);
+    await absorbOne('cap3@x.co');
+    const paused = { ok: false, status: 503, body: { error: 'service_paused' }, headers: {} };
+    expect(await m.authorize(ask('cap4@x.co'))).toMatchObject(paused);
+    expect(await m.authorize(ask('cap4@x.co'))).not.toHaveProperty('body.resetsAt');
+    expect(console.error).toHaveBeenCalledWith('SERVICE_PAUSED', expect.objectContaining({ appId: 'nousage', reason: 'no_usage_cap' }));
+    // Another app in the table is not paused.
+    expect((await meter().authorize(ask('cap4@x.co'))).ok).toBe(true);
+    clock = new Date('2026-11-04T00:05:00.000Z');
+    expect(await meter({ appId: 'nousage' }).authorize(ask('cap4@x.co'))).toMatchObject(paused);
+    // The operator's clear, after fixing the cause.
+    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk: 'APP#nousage', sk: 'PAUSED' } }));
+    expect((await m.authorize(ask('cap4@x.co'))).ok).toBe(true);
   });
 
   test("T7: 'unknown': aborted, at the hold, no error log", async () => {

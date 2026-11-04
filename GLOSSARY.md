@@ -27,7 +27,7 @@ The scheduled settle of a hold nobody settled within 30 minutes, at the hold's a
 An ADJUST written when real usage arrives after a sweep.
 
 **Absorbed**:
-The part of an EVENT's cost the operator pays instead of the person (an attempt that didn't serve the person). Recorded at list price and counted toward caps; the person's spend excludes it.
+The part of an EVENT's cost the operator pays instead of the person (an attempt that didn't serve the person, or whose usage the provider didn't report). Recorded at list price and counted toward caps; the person's spend excludes it.
 _Avoid_: written off, free
 
 ## Actions
