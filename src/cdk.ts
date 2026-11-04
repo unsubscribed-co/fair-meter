@@ -21,8 +21,8 @@ import { usdToMicroUsd } from './cost';
 import { EXPORT_COLUMNS, streamFilterPattern } from './export';
 import { hostedBilling, isHttpsUrl, type Actions, type FairMeterConfig } from './fair-meter';
 import { assertAppId, DEFAULT_TABLE_KEYS, type TableKeys } from './keys';
-import { spendParts } from './wallet';
-import { loadFeeFile, loadPriceFiles } from './prices';
+import { feeOf, spendParts } from './wallet';
+import { highestFeeBps, loadFeeFile, loadPriceFiles } from './prices';
 import { LOW_BALANCE_USD_DEFAULT } from './reconcile';
 
 // esbuild skips tsconfig files inside node_modules, so name ours or the handlers lose "use strict" in an app's bundle.
@@ -714,8 +714,10 @@ export class Metering extends Construct {
       maxConcurrency: props.actions.maxConcurrency ?? 10,
     };
     const actionFloorMicroUsd = actions && floorMicroUsd(actions);
-    if (actionFloorMicroUsd !== undefined && actionFloorMicroUsd >= dailyCapMicroUsd) {
-      throw new Error(`Metering: the action floor (${actionFloorMicroUsd} micro-USD) must be below dailyCapUsd; lower perPersonPerMinute or maxConcurrency`);
+    // Hosted, the cap counts charged amounts: the floor with its fee.
+    const capFloor = actionFloorMicroUsd !== undefined && walletTable ? actionFloorMicroUsd + feeOf(actionFloorMicroUsd, highestFeeBps()) : actionFloorMicroUsd;
+    if (capFloor !== undefined && capFloor >= dailyCapMicroUsd) {
+      throw new Error(`Metering: the action floor${walletTable ? ' with its fee' : ''} (${capFloor} micro-USD) must be below dailyCapUsd; lower perPersonPerMinute or maxConcurrency`);
     }
     if (actions && props.actions!.reserveConcurrency) this.concurrency = { max: actions.maxConcurrency, reserved: 0 };
     // Money records live here: never deleted with the stack, restorable to any second of the last 35 days.

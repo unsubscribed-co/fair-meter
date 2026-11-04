@@ -188,7 +188,7 @@ new Metering(this, 'Metering', {
 
 floor = `perPersonPerMinute` x 45 x `maxConcurrency` x the highest per-action price (micro-USD, rounded up) over every version of every SKU in `actions.skus`
 
-Defaults: `perPersonPerMinute` 20, `maxConcurrency` 10. For example, 20 x 45 x 10 x 5 micro-USD = 45,000 micro-USD, $0.045 of a $0.50 cap. Synth fails when an SKU has no `unit: "units"` price file in `prices/`, or when the floor isn't below `dailyCapUsd`.
+Defaults: `perPersonPerMinute` 20, `maxConcurrency` 10. For example, 20 x 45 x 10 x 5 micro-USD = 45,000 micro-USD, $0.045 of a $0.50 cap. Synth fails when an SKU has no `unit: "units"` price file in `prices/`, or when the floor isn't below `dailyCapUsd` (under hosted billing, the floor plus its fee at the highest rate in `prices/fee.json`, as the cap counts it; `FairMeter` checks the same at startup).
 
 Why it bounds spend (prepaid, never debt): AI holds can't use the floor (`authorize` checks and reserves against `cap - floor`), and an action reaches `committedMicroUsd` at most 45 minutes after it happens (the rollup lag): its window is due 30 minutes after it starts, and the other 15 cover EventBridge's delay, the run's own time and Logs Insights polling. Within those 45 minutes one instance lets a person do at most `perPersonPerMinute` actions a minute, and at most `maxConcurrency` instances run at once, so the actions not yet counted cost at most the floor. Rounding each action's price up also covers the rollup's rounding up per window. So at any moment the person's spend is at most committed (no more than `cap - floor` when the last write was allowed) plus the floor: the cap.
 

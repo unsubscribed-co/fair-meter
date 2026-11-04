@@ -9,7 +9,7 @@ import { assertAppId, conditionFailed, keys, nextUtcDay, nextUtcMonth, pkNotExis
 import { absorbedOf, recordUsage, walletChargeOf, type UsageRecord } from './ledger';
 import { takeCapacity } from './measure';
 import { Meter } from './meter';
-import { feeAt, type FeeFile } from './prices';
+import { feeAt, highestFeeBps, type FeeFile } from './prices';
 import { priceCall, priceShape, reserveCost, versionStartedBy, versionCovers, type CallUsage, type PriceShape } from './pricing';
 import { canonicalMeters, isProvider, metersFromUsage, type Provider } from './usage';
 import { feeOf, PASS_TTL_SECONDS, walletKeys } from './wallet';
@@ -197,8 +197,10 @@ function readConfig(config?: FairMeterConfig): FairMeterConfig {
     const a = c.actions;
     if (!Array.isArray(a.skus) || !a.skus.length || !a.skus.every((s) => typeof s === 'string' && s)) throw new Error('FairMeter: actions.skus must be a non-empty list of SKUs');
     if (!positive(a.perPersonPerMinute) || !positive(a.maxConcurrency)) throw new Error('FairMeter: actions.perPersonPerMinute and actions.maxConcurrency must be positive integers');
-    const floor = c.actionFloorMicroUsd;
-    if (!(Number.isSafeInteger(floor) && floor! >= 0 && floor! < c.dailyCapMicroUsd)) throw new Error('FairMeter: actionFloorMicroUsd must be an integer from 0 to below dailyCapMicroUsd');
+    const floor = c.actionFloorMicroUsd!;
+    // Hosted, the cap counts charged amounts: the floor with its fee.
+    const capFloor = billing ? floor + feeOf(floor, highestFeeBps(billing.fee)) : floor;
+    if (!(Number.isSafeInteger(floor) && floor >= 0 && capFloor < c.dailyCapMicroUsd)) throw new Error('FairMeter: actionFloorMicroUsd (hosted, with its fee) must be an integer from 0 to below dailyCapMicroUsd');
   }
   return c;
 }
@@ -327,7 +329,7 @@ export class FairMeter {
     // AI holds stop at cap - floor: the floor stays free for actions the rollup hasn't counted yet.
     const limit = cap - floor;
     if (held > limit) {
-      console.error('CALL_EXCEEDS_CAP', { ...log, reservedMicroUsd: reserved, dailyCapMicroUsd: cap, ...(this.floor ? { actionFloorMicroUsd: this.floor } : {}) });
+      console.error('CALL_EXCEEDS_CAP', { ...log, reservedMicroUsd: reserved, dailyCapMicroUsd: cap, ...(floor ? { actionFloorMicroUsd: floor } : {}) });
       return refuse(429, 'daily_limit_reached', { resetsAt: nextUtcDay(at) }, tier);
     }
     if (pastFloor(committed + held, cap, floor)) return this.limitReached(log, at, tier);

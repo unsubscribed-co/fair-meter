@@ -283,6 +283,13 @@ suite('hosted billing against DynamoDB Local', () => {
       expect((await m.authorize(ask(person))).ok).toBe(true);
     });
 
+    test('a hold plus fee above the cap minus the floor with its fee: CALL_EXCEEDS_CAP logs the floor it checked, with its fee', async () => {
+      const actions = { actions: { skus: ['stacksplit-new-expense'], perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 1_000, dailyCapMicroUsd: HELD + 1_999 };
+      const { m, person } = await linked('exceeds', 100_000, actions);
+      expect(await m.authorize(ask(person))).toMatchObject({ ok: false, status: 429, body: { error: 'daily_limit_reached' } });
+      expect(console.error).toHaveBeenCalledWith('CALL_EXCEEDS_CAP', expect.objectContaining({ dailyCapMicroUsd: HELD + 1_999, actionFloorMicroUsd: 2_000 }));
+    });
+
     test("the app's floor stays free of AI holds: available must cover hold, fee and the floor with its fee", async () => {
       const floor = 1_000;
       const actions = { actions: { skus: ['stacksplit-new-expense'], perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: floor };

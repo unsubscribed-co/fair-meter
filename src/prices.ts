@@ -100,6 +100,9 @@ export function parseFeeFile(text: string): FeeFile {
 
 export const loadFeeFile = (): FeeFile => parseFeeFile(readFileSync(path.join(PRICES_DIR, FEE_FILE), 'utf8'));
 
+/** The highest fee of any version: what a limit checked once (at synth or startup) must allow for. */
+export const highestFeeBps = (fee = loadFeeFile()) => Math.max(...fee.versions.map((v) => v.feeBps));
+
 /** The fee version valid at `at`. */
 export function feeAt(at: Date, fee = loadFeeFile()): FeeFile['versions'][number] {
   const version = versionStartedBy(fee.versions, at);

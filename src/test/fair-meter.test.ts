@@ -542,6 +542,10 @@ describe('T19: config, refused at startup', () => {
     ['bad tiers', { tiers: { savingPct: 90, essentialPct: 75 } }],
     ['actions without a floor', { actions: { skus: ['a'], perPersonPerMinute: 20, maxConcurrency: 10 } }],
     ['a floor not below the cap', { actions: { skus: ['a'], perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 500_000 }],
+    ['hosted: a floor whose fee (100%) takes it to the cap', {
+      billing: { walletTable: 'wallet', topUpUrl: 'https://pay.dev.example', fee: { versions: [{ validFrom: '2026-10-29T00:00:00Z', feeBps: 10_000 }] } },
+      actions: { skus: ['a'], perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 250_000,
+    }],
     ['actions without SKUs', { actions: { skus: [], perPersonPerMinute: 20, maxConcurrency: 10 }, actionFloorMicroUsd: 1 }],
     ['a zero per-minute limit', { actions: { skus: ['a'], perPersonPerMinute: 0, maxConcurrency: 10 }, actionFloorMicroUsd: 1 }],
   ])('%s', (_, bad) => {

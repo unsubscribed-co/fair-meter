@@ -277,6 +277,15 @@ describe('hosted billing: { walletTable }', () => {
     expect(walletStatements(hosted().t, prefix)).toEqual(expected);
   });
 
+  test('refused at synth: a floor below dailyCapUsd whose fee (100%) takes it to the cap; without hosted billing the same floor synthesizes', () => {
+    const actions = { skus: ['stacksplit-new-expense'], perPersonPerMinute: 120 }; // a floor of 270,000 under a cap of 500,000
+    expect(() => synth({ actions })).not.toThrow();
+    const s = new cdk.Stack(new cdk.App({ context: { 'aws:cdk:bundling-stacks': [] } }), 'S');
+    const walletTable = dynamodb.Table.fromTableArn(s, 'Wallet', WALLET_ARN);
+    expect(() => new Metering(s, 'Metering', { appId: 'stacksplit', env: 'prod', dailyCapUsd: '0.50', appDailyCapUsd: '5', billing: { walletTable, topUpUrl: 'https://pay.dev.example' }, actions }))
+      .toThrow('Metering: the action floor with its fee (540000 micro-USD) must be below dailyCapUsd; lower perPersonPerMinute or maxConcurrency');
+  });
+
   test('its error terms join the metering error alarm', () => {
     hosted().t.hasResourceProperties('AWS::Logs::MetricFilter', {
       FilterPattern: Match.stringLikeRegexp('ROLLUP_LATE.*FLOOR_OVERRUN.*ACCOUNT_NOT_LINKED.*LINK_CONFLICT.*BALANCE_MISSING.*MOVE_CHAIN_TOO_LONG'), LogGroupName: { Ref: Match.stringLikeRegexp('^ApiLogs') },
