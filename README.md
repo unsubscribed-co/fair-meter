@@ -2,6 +2,8 @@
 
 Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): every paid thing a person does, an AI call or an action like a new expense, is priced at the published list price and written to an append-only ledger in a DynamoDB table that metering owns, with caps that stop spend before it happens. Self-hosted copies run it with `billing: 'none'`: the ledger and caps stay on, nobody is charged, no fee.
 
+**v0.4.3** lowers StackSplit's usage profiles to a believable day: regular is 10 new expenses, 4 changes and 5 assistant questions a day (was 35, 15 and 5), light 2, 1 and 1, heavy 40, 16 and 20. Its published list (`prices/apps/stacksplit.list.json`, valid from 2026-11-05) is regenerated with `list --write`; action and AI prices are unchanged, so only the profile estimates move (regular $0.1868 a month, was $0.2055). No code change.
+
 **v0.4.2** hardens the money path before real money. A provider answer without usable usage (`no_usage`) is absorbed: the person pays nothing, `USAGE_MISSING` still alarms, and past `noUsageCapUsd` (default USD 1 per app, in total across days) of that cost the app's AI calls pause until an operator resets it (see "When the provider reports no usage"). A settle or release moves money only for the hold `authorize` wrote (its person, time, reservation, fee rate and account). Hosted: a late usage after a sweep stays absorbed; an app's role reaches only its own `LINK#<app>#*` rows; synth and startup check the action floor with its fee against the daily cap, and `CALL_EXCEEDS_CAP` logs that floor; a cached link no longer relabels a moved wallet. ADJUST rows carry `env`. Each `authorize` makes one more consistent read (`APP#<app>` `NO_USAGE`). Upgrading: a hosted settle queued by v0.4.1 (no `feeBps` on its record) is parked in the retry DLQ (`USAGE_RECORD_PARKED`), and the sweeper settles its hold, absorbed.
 
 **v0.4.1** splits each app's month in the wallet's SPEND row into the providers' cost and the project's fee, so the wallet can show "$0.0016 = providers $0.0008 + project $0.0008"; `billing: 'none'` is unchanged.
@@ -15,7 +17,7 @@ Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): ev
 TypeScript source, no build step: your bundler (esbuild via CDK's `NodejsFunction`) compiles it with your code.
 
 ```
-npm install github:unsubscribed-co/fair-meter#v0.4.2
+npm install github:unsubscribed-co/fair-meter#v0.4.3
 ```
 
 - `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/testing` has the test double (`FakeFairMeter`, see "Testing your metering code"); `fair-meter/<file>` reaches one file.
@@ -140,7 +142,7 @@ npx tsx node_modules/fair-meter/src/prices-cli.ts price-history <sku> --table <n
 }
 ```
 
-The profiles every app uses: light is 1 AI call and 10 actions a day, regular 5 and 50, heavy 20 and 200. Then, with no AWS credentials:
+Each profile is a believable person's day in that app, not a round number: StackSplit's light is 1 AI call and 3 actions a day (2 new expenses, 1 change), regular 5 and 14 (10 and 4), heavy 20 and 56 (40 and 16). Then, with no AWS credentials:
 
 ```sh
 npx tsx node_modules/fair-meter/src/prices-cli.ts list <app> [--write --valid-from <iso>]

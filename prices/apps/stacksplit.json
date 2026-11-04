@@ -27,8 +27,8 @@
   "profiles": {
     "light": {
       "actions": {
-        "stacksplit-new-expense": 7,
-        "stacksplit-change-expense": 3
+        "stacksplit-new-expense": 2,
+        "stacksplit-change-expense": 1
       },
       "ai": {
         "claude-haiku-5-5": {
@@ -43,8 +43,8 @@
     },
     "regular": {
       "actions": {
-        "stacksplit-new-expense": 35,
-        "stacksplit-change-expense": 15
+        "stacksplit-new-expense": 10,
+        "stacksplit-change-expense": 4
       },
       "ai": {
         "claude-haiku-5-5": {
@@ -59,8 +59,8 @@
     },
     "heavy": {
       "actions": {
-        "stacksplit-new-expense": 140,
-        "stacksplit-change-expense": 60
+        "stacksplit-new-expense": 40,
+        "stacksplit-change-expense": 16
       },
       "ai": {
         "claude-haiku-5-5": {
