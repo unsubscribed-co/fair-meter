@@ -2,6 +2,8 @@
 
 Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): every paid thing a person does, an AI call or an action like a new expense, is priced at the published list price and written to an append-only ledger in a DynamoDB table that metering owns, with caps that stop spend before it happens. Self-hosted copies run it with `billing: 'none'`: the ledger and caps stay on, nobody is charged, no fee.
 
+**v0.4.2** hardens the money path before real money. A provider answer without usable usage (`no_usage`) is absorbed: the person pays nothing, `USAGE_MISSING` still alarms, and past `noUsageDailyCapUsd` (default USD 1 a day per app) of that cost the app's AI calls pause until an operator clears them (see "When the provider reports no usage"). A settle or release moves money only for the hold `authorize` wrote (its person, time, reservation, fee rate and account). Hosted: a late usage after a sweep stays absorbed; an app's role reaches only its own `LINK#<app>#*` rows; synth and startup check the action floor with its fee against the daily cap, and `CALL_EXCEEDS_CAP` logs that floor; a cached link no longer relabels a moved wallet. ADJUST rows carry `env`. Each `authorize` makes one more consistent read (`APP#<app>` `PAUSED`). Upgrading: a hosted settle queued by v0.4.1 (no `feeBps` on its record) is parked in the retry DLQ (`USAGE_RECORD_PARKED`), and the sweeper settles its hold, absorbed.
+
 **v0.4.1** splits each app's month in the wallet's SPEND row into the providers' cost and the project's fee, so the wallet can show "$0.0016 = providers $0.0008 + project $0.0008"; `billing: 'none'` is unchanged.
 
 **v0.4.0** adds hosted billing: with `billing: { walletTable }` every hold, settle, release, sweep and rollup charge, plus the fee, moves the person's prepaid wallet in the same transaction as the ledger (see "Hosted billing"). `billing: 'none'` is unchanged, byte for byte.
@@ -13,7 +15,7 @@ Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): ev
 TypeScript source, no build step: your bundler (esbuild via CDK's `NodejsFunction`) compiles it with your code.
 
 ```
-npm install github:unsubscribed-co/fair-meter#v0.4.1
+npm install github:unsubscribed-co/fair-meter#v0.4.2
 ```
 
 - `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/testing` has the test double (`FakeFairMeter`, see "Testing your metering code"); `fair-meter/<file>` reaches one file.
