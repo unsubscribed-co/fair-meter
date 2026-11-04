@@ -537,6 +537,15 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, absorbedMicroUsd: RESERVED, feeMicroUsd: 0, account })]);
     });
 
+    test('no usage from the provider (a 200 without usage): absorbed, the whole hold back, nothing spent, USAGE_MISSING', async () => {
+      const { m, person, account } = await linked('nousage', 100_000);
+      const call = (await m.authorize(ask(person))) as Reservation;
+      expect(await m.record(call, undefined)).toBe('recorded');
+      expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000, heldMicroUsd: 0, spentMicroUsd: 0 });
+      expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, absorbedMicroUsd: RESERVED, feeMicroUsd: 0, estimated: 'no_usage' })]);
+      expect(console.error).toHaveBeenCalledWith('USAGE_MISSING', expect.anything());
+    });
+
     test('a settle that waits on the retry queue carries its wallet move: the retry Lambda writes it exactly once', async () => {
       const { m, person, account } = await linked('queued', 100_000);
       const call = (await m.authorize(ask(person))) as Reservation;

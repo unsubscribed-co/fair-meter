@@ -70,13 +70,13 @@ export interface UsageRecord {
 
 /**
  * What the operator absorbs of a settle, always a part of cost: the whole cost of an attempt that
- * didn't serve the person (swept, aborted). It still counts toward the cap; the person is charged
+ * didn't serve the person (swept, aborted) or whose usage the provider didn't report (no_usage). It still counts toward the cap; the person is charged
  * cost minus absorbed. Hosted, the cost the wallet wasn't charged (above the hold, or a rollup's
  * floor overrun): cost + fee - charged, where the fee is the part of the charge that is fee (walletChargeOf).
  */
 export const absorbedOf = (r: Pick<UsageRecord, 'estimated' | 'release' | 'costMicroUsd' | 'wallet'>) =>
   r.wallet ? (r.release ? 0 : r.costMicroUsd + r.wallet.feeMicroUsd - r.wallet.chargedMicroUsd)
-    : !r.release && (r.estimated === 'swept' || r.estimated === 'aborted') ? r.costMicroUsd : 0;
+    : !r.release && r.estimated !== undefined ? r.costMicroUsd : 0;
 
 /**
  * Hosted: what the wallet is charged for `paidMicroUsd` of cost plus its fee, at most `capMicroUsd`
@@ -287,7 +287,10 @@ export function usageTransaction(table: string, r: UsageRecord) {
             },
           },
       ...householdMonth,
-      counter(keys.appDay(r.appId, day)),
+      r.estimated === 'no_usage'
+        // The app's no_usage cost today, which FairMeter pauses the app's AI calls past.
+        ? { Update: { TableName: table, Key: keys.appDay(r.appId, day), UpdateExpression: `${counters.UpdateExpression}, noUsageMicroUsd :cost`, ExpressionAttributeValues: counters.ExpressionAttributeValues } }
+        : counter(keys.appDay(r.appId, day)),
       counter(keys.globalDay(day)),
       ...(provider
         ? [

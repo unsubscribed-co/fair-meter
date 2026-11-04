@@ -157,14 +157,15 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect(await pendingOf('t4@x.co')).toHaveLength(9);
   });
 
-  test.each([['undefined', undefined], ['{}', {}]])('T6: no usable usage (%s): the hold, no_usage, USAGE_MISSING', async (name, given) => {
+  test.each([['undefined', undefined], ['{}', {}]])('T6: no usable usage (%s): the hold, no_usage, absorbed, USAGE_MISSING', async (name, given) => {
     const person = `t6-${name.length}@x.co`;
     const call = (await meter().authorize(ask(person))) as Reservation;
     expect(await meter().record(call, given)).toBe('recorded');
-    expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, estimated: 'no_usage' })]);
-    // A 200 without usage served the person: not absorbed.
-    expect((await events(person))[0]).not.toHaveProperty('absorbedMicroUsd');
-    expect(charged(await day(person))).toBe(RESERVED);
+    // The provider's fault, not the person's (Juan, 2026-11-03): absorbed, the person pays nothing.
+    expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, estimated: 'no_usage', absorbedMicroUsd: RESERVED })]);
+    expect(charged(await day(person))).toBe(0);
+    // The app's day adds up what it absorbed this way, for the ceiling.
+    expect(await get('APP#stacksplit', 'DAILY#2026-11-03')).toMatchObject({ noUsageMicroUsd: expect.any(Number) });
     expect(console.error).toHaveBeenCalledWith('USAGE_MISSING', expect.anything());
   });
 
