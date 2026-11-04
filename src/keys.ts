@@ -14,8 +14,9 @@
  *   USER#<sub>        RATE#<app>#<YYYY-MM-DDTHH:MM>   calls this UTC minute (per-minute brake); expiresAt (TTL)
  *   USER#<sub>        EVENT#<iso-ms>#<app>#<requestId> one item per call (appId attribute too)
  *   USER#<sub>        ADJUST#<iso-ms>#<app>#<adjId>   one correction of one event (iso-ms = the EVENT's time)
- *   APP#<app>         DAILY#<YYYY-MM-DD>              counters (per-app circuit breaker); noUsageMicroUsd (FairMeter: no_usage absorbed)
- *   APP#<app>         PAUSED                          FairMeter: AI calls refused service_paused until an operator deletes it
+ *   APP#<app>         DAILY#<YYYY-MM-DD>              counters (per-app circuit breaker)
+ *   APP#<app>         NO_USAGE                        FairMeter: noUsageMicroUsd, the no_usage cost absorbed since an operator last
+ *                                                     deleted it; past the cap the app's AI calls are refused service_paused
  *   GLOBAL            DAILY#<YYYY-MM-DD>              counters (all-apps ceiling)
  *   PENDING#<app>     CALL#<callId>                   FairMeter: one open reservation per provider attempt, deleted
  *                                                     when it is settled (EVENT put in the same transaction) or released
@@ -110,8 +111,8 @@ export const keys = {
   /** Calls this UTC minute ("2026-10-06T14:05"), any metered kind: the per-minute brake. */
   userRate: (sub: string, appId: string, minute: string) => key(userPk(sub), `RATE#${appId}#${minute}`),
   appDay: (appId: string, day: string) => key(`APP#${appId}`, `DAILY#${day}`),
-  /** FairMeter: the app's AI calls are paused until an operator deletes it (the no_usage cap). */
-  appPause: (appId: string) => key(`APP#${appId}`, 'PAUSED'),
+  /** FairMeter: the app's no_usage cost absorbed in total; deleting it is the operator's reset. */
+  appNoUsage: (appId: string) => key(`APP#${appId}`, 'NO_USAGE'),
   globalDay: (day: string) => key(GLOBAL_PK, `DAILY#${day}`),
   event: (sub: string, requestTime: string, appId: string, requestId: string) =>
     key(userPk(sub), `EVENT#${requestTime}#${appId}#${requestId}`),

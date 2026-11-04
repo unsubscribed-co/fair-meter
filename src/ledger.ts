@@ -287,10 +287,9 @@ export function usageTransaction(table: string, r: UsageRecord) {
             },
           },
       ...householdMonth,
-      r.estimated === 'no_usage'
-        // The app's no_usage cost today, which FairMeter pauses the app's AI calls past.
-        ? { Update: { TableName: table, Key: keys.appDay(r.appId, day), UpdateExpression: `${counters.UpdateExpression}, noUsageMicroUsd :cost`, ExpressionAttributeValues: counters.ExpressionAttributeValues } }
-        : counter(keys.appDay(r.appId, day)),
+      counter(keys.appDay(r.appId, day)),
+      // The app's no_usage cost in total, which FairMeter pauses the app's AI calls past.
+      ...(r.estimated === 'no_usage' ? [{ Update: { TableName: table, Key: keys.appNoUsage(r.appId), UpdateExpression: 'ADD noUsageMicroUsd :cost', ExpressionAttributeValues: { ':cost': r.costMicroUsd } } }] : []),
       counter(keys.globalDay(day)),
       ...(provider
         ? [

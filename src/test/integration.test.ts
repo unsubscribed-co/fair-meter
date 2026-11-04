@@ -164,28 +164,32 @@ suite('★ FairMeter against DynamoDB Local', () => {
     // The provider's fault, not the person's (Juan, 2026-11-03): absorbed, the person pays nothing.
     expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, estimated: 'no_usage', absorbedMicroUsd: RESERVED })]);
     expect(charged(await day(person))).toBe(0);
-    // The app's day adds up what it absorbed this way, for the ceiling.
-    expect(await get('APP#stacksplit', 'DAILY#2026-11-03')).toMatchObject({ noUsageMicroUsd: expect.any(Number) });
+    // The app's running total of what it absorbed this way, for the ceiling.
+    expect(await get('APP#stacksplit', 'NO_USAGE')).toMatchObject({ noUsageMicroUsd: expect.any(Number) });
     expect(console.error).toHaveBeenCalledWith('USAGE_MISSING', expect.anything());
   });
 
-  test("the no_usage ceiling: past the app's absorbed no_usage cost for the day, its AI calls pause until an operator deletes APP#<app> PAUSED, past midnight too", async () => {
-    const m = meter({ appId: 'nousage', noUsageDailyCapMicroUsd: 2 * RESERVED });
+  test("the no_usage ceiling: past the app's absorbed no_usage cost in total (across days), its AI calls pause until an operator deletes APP#<app> NO_USAGE", async () => {
+    const m = meter({ appId: 'nousage', noUsageCapMicroUsd: 2 * RESERVED });
     const absorbOne = async (person: string) => expect(await m.record((await m.authorize(ask(person))) as Reservation, undefined)).toBe('recorded');
     await absorbOne('cap1@x.co');
     expect((await m.authorize(ask('cap2@x.co'))).ok).toBe(true);
+    // A slow leak: the next day's no_usage adds to the same total.
+    clock = new Date('2026-11-04T14:05:09.120Z');
     await absorbOne('cap3@x.co');
     const paused = { ok: false, status: 503, body: { error: 'service_paused' }, headers: {} };
     expect(await m.authorize(ask('cap4@x.co'))).toMatchObject(paused);
     expect(await m.authorize(ask('cap4@x.co'))).not.toHaveProperty('body.resetsAt');
     expect(console.error).toHaveBeenCalledWith('SERVICE_PAUSED', expect.objectContaining({ appId: 'nousage', reason: 'no_usage_cap' }));
-    // Another app in the table is not paused.
+    // Another app in the table is not paused; nor does midnight lift it.
     expect((await meter().authorize(ask('cap4@x.co'))).ok).toBe(true);
-    clock = new Date('2026-11-04T00:05:00.000Z');
-    expect(await meter({ appId: 'nousage' }).authorize(ask('cap4@x.co'))).toMatchObject(paused);
-    // The operator's clear, after fixing the cause.
-    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk: 'APP#nousage', sk: 'PAUSED' } }));
+    clock = new Date('2026-11-05T00:05:00.000Z');
+    expect(await m.authorize(ask('cap4@x.co'))).toMatchObject(paused);
+    // The operator's reset, after fixing the cause: the pause and the total go together.
+    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pk: 'APP#nousage', sk: 'NO_USAGE' } }));
     expect((await m.authorize(ask('cap4@x.co'))).ok).toBe(true);
+    await absorbOne('cap5@x.co');
+    expect((await m.authorize(ask('cap6@x.co'))).ok).toBe(true);
   });
 
   test("T7: 'unknown': aborted, at the hold, no error log", async () => {
