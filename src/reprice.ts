@@ -212,6 +212,7 @@ export function planReprice(args: {
       sub,
       ...(householdId !== undefined ? { householdId } : {}),
       ...(event.plan ? { plan: String(event.plan) } : {}),
+      ...(event.env !== undefined ? { env: String(event.env) } : {}),
       eventSk: sk,
       eventTime: ledgerTime(sk),
       legacyEvent: event.appId === undefined,

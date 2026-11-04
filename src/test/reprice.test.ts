@@ -1,4 +1,5 @@
 import { adjustmentId } from '../adjust';
+import { adjustmentTransaction } from '../adjust';
 import { formatRepricePlan, parseRepriceArgs, planReprice, repriceEvent, storedMeters, type PriceHistory } from '../reprice';
 
 const offPeak = { inputMicroUsdPerMTok: 150_000, cachedInputMicroUsdPerMTok: 3_000, outputMicroUsdPerMTok: 600_000 };
@@ -190,6 +191,12 @@ describe('planReprice', () => {
     const plan = planReprice({ ...base, events: [absorbed('swept'), absorbed('aborted')] });
     expect(plan.adjustments).toEqual([]);
     expect(plan.unrepriceable.map((u) => u.reason)).toEqual(['estimated usage', 'estimated usage']);
+  });
+
+  test("an ADJUST carries its EVENT's env, like every record", () => {
+    const plan = planReprice({ ...base, events: [legacyChat(SATURDAY_NOON, { env: 'dev' }), legacyChat(WEDNESDAY_PEAK)] });
+    expect(plan.adjustments.map((a) => a.env)).toEqual(['dev', undefined]);
+    expect(adjustmentTransaction('t', plan.adjustments[0]).input.TransactItems![0].Put!.Item).toMatchObject({ env: 'dev' });
   });
 
   test("billing 'none': corrections of plan-less events never touch credit", () => {

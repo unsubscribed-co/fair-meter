@@ -28,6 +28,8 @@ export interface Adjustment {
   householdId?: string;
   /** The corrected event's plan (undefined = legacy prepaid). */
   plan?: string;
+  /** The corrected event's deployment, when it has one. */
+  env?: string;
   /** SK of the EVENT this corrects (same USER# partition). */
   eventSk: string;
   /** The event's time (ISO, ms). Picks the key and the counters' periods: the event's, not today's. */
@@ -106,6 +108,7 @@ export function adjustmentTransaction(table: string, a: Adjustment) {
             appId: a.appId,
             ...(a.householdId !== undefined ? { householdId: a.householdId } : {}),
             ...(a.plan ? { plan: a.plan } : {}),
+            ...(a.env !== undefined ? { env: a.env } : {}),
             eventSk: a.eventSk,
             eventTime: a.eventTime,
             month: a.eventTime.slice(0, 7),

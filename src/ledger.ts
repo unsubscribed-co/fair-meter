@@ -389,6 +389,7 @@ async function trueUp(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord
   const adjustment = {
     appId: r.appId,
     sub: r.sub,
+    ...(r.env !== undefined ? { env: r.env } : {}),
     eventSk,
     eventTime: r.requestTime,
     legacyEvent: false,
