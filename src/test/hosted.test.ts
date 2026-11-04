@@ -526,6 +526,16 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000, heldMicroUsd: 0, spentMicroUsd: 0 });
       expect(await events(person)).toEqual([expect.objectContaining({ estimated: 'swept', feeMicroUsd: 0, account })]);
     });
+
+    test('real usage after a sweep: the ADJUST keeps it all absorbed, so usage shows no charge the wallet never took', async () => {
+      const { m, person, account } = await linked('latesweep', 100_000);
+      const call = (await m.authorize(ask(person))) as Reservation;
+      await sweep(ddb, config, new Date(AT.getTime() + 31 * 60_000));
+      expect(await m.record(call, usage)).toBe('trued_up');
+      expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000, heldMicroUsd: 0, spentMicroUsd: 0 });
+      const { day, month } = await m.usage(person);
+      expect([day.spentMicroUsd, month.spentMicroUsd]).toEqual([0, 0]);
+    });
   });
 });
 

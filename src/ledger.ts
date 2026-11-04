@@ -400,8 +400,9 @@ async function trueUp(ddb: DynamoDBDocumentClient, table: string, r: UsageRecord
     oldCostMicroUsd: oldCost,
     newCostMicroUsd: newCost,
     deltaMicroUsd: newCost - oldCost,
-    // A late real usage charges the person; a late 'not_billed' leaves them at $0.
-    absorbedMicroUsd: absorbedOf(r) - Number(event.absorbedMicroUsd ?? 0),
+    // A late real usage charges the person; a late 'not_billed' leaves them at $0. Hosted, the
+    // wallet already got the hold back at the sweep and an ADJUST moves no wallet: all absorbed.
+    absorbedMicroUsd: (r.wallet ? newCost : absorbedOf(r)) - Number(event.absorbedMicroUsd ?? 0),
     // Deterministic, so a retry sends the same parameters under the same token.
     createdAt: r.requestTime,
     deductCredit: false,

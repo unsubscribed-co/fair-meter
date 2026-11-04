@@ -69,7 +69,7 @@ Each `FairMeter` caches a SKU's price versions for 5 minutes and picks the one v
 | `'not_sent'` | the app reserved but never called the provider | the same release as `'not_billed'` (the same record: one after the other is a `duplicate`) | nobody |
 | `undefined` or malformed | a 200 without usable usage | the hold, `estimated: 'no_usage'`, USAGE_MISSING alarms | the person (they were served) |
 
-An absorbed attempt keeps its list-price cost and counts toward the cap, but the EVENT and the person's day and month rows carry `absorbedMicroUsd`: the person is charged `costMicroUsd − absorbedMicroUsd`. The sweeper's settles are absorbed too. A late true-up of a swept attempt moves it: real usage charges the person its real cost, a late `'not_billed'` leaves them at $0.
+An absorbed attempt keeps its list-price cost and counts toward the cap, but the EVENT and the person's day and month rows carry `absorbedMicroUsd`: the person is charged `costMicroUsd − absorbedMicroUsd`. The sweeper's settles are absorbed too. A late true-up of a swept attempt moves it: real usage charges the person its real cost (hosted billing: absorbed, since the wallet got the hold back at the sweep), a late `'not_billed'` leaves them at $0.
 
 Outcomes: `recorded`, `duplicate`, `trued_up` (real usage after the sweeper's estimate, written as an ADJUST), `conflict` (another payload for a settled call: refused, RECORD_CONFLICT alarms), `deferred` (queued), `failed` (queue down too: USAGE_RECORD_FAILED; the sweeper still settles the hold). A cost above the hold is recorded as it is and logs RESERVATION_EXCEEDED, which alarms: it is the only sign that `max` didn't bound the call and the cap was overshot.
 
@@ -243,7 +243,7 @@ Options: `dailyCapMicroUsd` (default 500,000, $0.50), `actions` and `actionFloor
 
 ### Known limits (v0.4.0)
 
-- **A true-up doesn't move the wallet.** A late real usage after the sweeper's estimate writes its ADJUST as before, but the swept hold was already given back at $0: the operator absorbs that call.
+- **A true-up doesn't move the wallet.** A late real usage after the sweeper's estimate writes its ADJUST as before, but the swept hold was already given back at $0: the operator absorbs that call. Since v0.4.2 the ADJUST records it as absorbed, so `usage` and statements show no charge either.
 - **`dynamodb:Attributes` on update expressions is not checked by DynamoDB Local.** Run a hosted hold, settle, rollup, link and pass in a dev deploy before relying on the policy.
 
 ### Known limits (v0.3.0)
