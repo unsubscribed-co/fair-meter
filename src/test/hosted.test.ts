@@ -196,6 +196,10 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await getW(`LINK#nieto#${a}`, 'LINK')).toMatchObject({ account: c });
       expect(await balance(c)).toMatchObject({ links: new Set([`nieto#${a}`]), email: 'c@x.co', lang: 'en' });
       expect((await balance(a))?.links).toEqual(new Set([`stacksplit#${person}`]));
+      // Signing in with A again on the same instance (the cached link), a new email: no wallet's labels change.
+      expect(await m.link(person, a, { email: 'a2@x.co', lang: 'en' })).toBe('linked');
+      expect(await balance(a)).toMatchObject({ email: 'a@x.co', lang: 'es' });
+      expect(await balance(c)).toMatchObject({ email: 'c@x.co', lang: 'en' });
     });
 
     test('a movedTo chain longer than the bound: conflict, nothing written, MOVE_CHAIN_TOO_LONG', async () => {

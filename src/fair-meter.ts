@@ -612,7 +612,7 @@ export class FairMeter {
     const at = this.now().getTime();
     const known = this.links.get(person);
     if (known?.sub === sub && at - known.readAt >= 0 && at - known.readAt < LINK_CACHE_MS) {
-      if (known.account && (known.email !== labels.email || known.lang !== labels.lang)) await this.relabel(table, sub, labels);
+      if (known.account && known.to === sub && (known.email !== labels.email || known.lang !== labels.lang)) await this.relabel(table, sub, labels);
       this.links.set(person, { ...known, ...labels });
       return known.account ? 'linked' : 'conflict';
     }
