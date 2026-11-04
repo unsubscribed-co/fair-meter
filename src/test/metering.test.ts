@@ -258,10 +258,10 @@ describe('hosted billing: { walletTable }', () => {
   const get = (leadingKeys: string[], attributes: string[]) => ({ Effect: 'Allow', Action: 'dynamodb:GetItem', Resource: WALLET_ARN, Condition: scoped(leadingKeys, attributes) });
   const update = (leadingKeys: string[], attributes: string[]) => ({ Effect: 'Allow', Action: 'dynamodb:UpdateItem', Resource: WALLET_ARN, Condition: scoped(leadingKeys, attributes) });
 
-  test("the app's functions (wallet ADR 0001): read the guard, the link and movedTo; update the counters, its own SPEND counter and the link fields, never movedTo; PutItem on PASS# only", () => {
+  test("the app's functions (wallet ADR 0001): read the guard, its own app's links and movedTo; update the counters, its own SPEND counter and the link fields, never movedTo; PutItem on PASS# only", () => {
     expect(walletStatements(hosted().t, 'ApiServiceRoleDefaultPolicy')).toEqual([
-      get(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'account', 'email', 'lang', 'movedTo']),
-      update(['WALLET#*', 'LINK#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'stacksplit#costMicroUsd', 'stacksplit#feeMicroUsd', 'links', 'email', 'lang', 'account']),
+      get(['WALLET#*', 'LINK#stacksplit#*'], ['availableMicroUsd', 'account', 'email', 'lang', 'movedTo']),
+      update(['WALLET#*', 'LINK#stacksplit#*'], ['availableMicroUsd', 'heldMicroUsd', 'spentMicroUsd', 'stacksplit', 'stacksplit#costMicroUsd', 'stacksplit#feeMicroUsd', 'links', 'email', 'lang', 'account']),
       { Effect: 'Allow', Action: 'dynamodb:PutItem', Resource: WALLET_ARN, Condition: scoped(['PASS#*'], ['account', 'expiresAt']) },
     ]);
   });

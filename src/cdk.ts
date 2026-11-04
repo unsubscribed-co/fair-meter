@@ -640,7 +640,8 @@ function walletStatements(table: dynamodb.ITable, appId: string) {
       StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES', 'dynamodb:ReturnValues': ['NONE', 'UPDATED_OLD', 'UPDATED_NEW'] },
     },
   });
-  const linked = ['WALLET#*', 'LINK#*'];
+  // Only this app's own links (app ids never contain '#'): one app can't repoint another's person.
+  const linked = ['WALLET#*', `LINK#${appId}#*`];
   // The app's own SPEND# counter: the charge and its cost and fee parts.
   const spend = [appId, ...Object.values(spendParts(appId))];
   const wallet = ['WALLET#*'];
