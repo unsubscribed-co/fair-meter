@@ -41,6 +41,16 @@ const release: UsageRecord = { ...settle, release: true, details: { sku: 'claude
 const eventKey = { pk: 'USER#ana@x.co', sk: 'EVENT#2026-11-03T14:05:09.120Z#stacksplit#7f3c' };
 const pendingKey = { pk: 'PENDING#stacksplit', sk: 'CALL#7f3c' };
 
+/** Deleted only while it is the hold as authorize wrote it (billing 'none': no account on it). */
+const pendingDelete = {
+  Delete: {
+    TableName: 't', Key: pendingKey,
+    ConditionExpression: 'attribute_exists(pk) AND #person = :person AND #at = :at AND #reserved = :reserved AND attribute_not_exists(#account)',
+    ExpressionAttributeNames: { '#person': 'person', '#at': 'at', '#reserved': 'reservedMicroUsd', '#account': 'account' },
+    ExpressionAttributeValues: { ':person': 'ana@x.co', ':at': '2026-11-03T14:05:09.120Z', ':reserved': 5_798 },
+  },
+};
+
 const cancelled = (...codes: string[]) =>
   Object.assign(new Error('cancelled'), { name: 'TransactionCanceledException', CancellationReasons: codes.map((Code) => ({ Code })) });
 const event = (item?: Record<string, unknown>) => ddbMock.on(GetCommand).resolves({ Item: item });
@@ -67,7 +77,7 @@ describe('the settle transaction', () => {
     expect(items[2].Update!.UpdateExpression).toMatch(/, committedMicroUsd :held$/);
     expect(items[2].Update!.ExpressionAttributeValues![':held']).toBe(440 - 5_798);
     expect(items[1].Update!.UpdateExpression).not.toContain('committed');
-    expect(items.at(-1)).toEqual({ Delete: { TableName: 't', Key: pendingKey, ConditionExpression: 'attribute_exists(pk)' } });
+    expect(items.at(-1)).toEqual(pendingDelete);
     expect(items).toHaveLength(7);
   });
 
@@ -80,7 +90,7 @@ describe('the settle transaction', () => {
     const tx = usageTransaction('t', release).input;
     expect(tx.ClientRequestToken).toBe(clientRequestToken('stacksplit', '7f3c'));
     expect(tx.TransactItems).toEqual([
-      { Delete: { TableName: 't', Key: pendingKey, ConditionExpression: 'attribute_exists(pk)' } },
+      pendingDelete,
       { Update: { TableName: 't', Key: { pk: 'USER#ana@x.co', sk: 'DAILY#stacksplit#2026-11-03' }, UpdateExpression: 'ADD committedMicroUsd :held', ExpressionAttributeValues: { ':held': -5_798 } } },
     ]);
   });

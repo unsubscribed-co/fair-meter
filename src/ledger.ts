@@ -65,7 +65,7 @@ export interface UsageRecord {
    * fee (absent for rolled-up actions); `chargedMicroUsd` is what the person pays, cost minus absorbed
    * plus `feeMicroUsd`, never more than the hold (or, for actions, than available at the rollup's read).
    */
-  wallet?: { table: string; account: string; heldMicroUsd?: number; feeMicroUsd: number; chargedMicroUsd: number };
+  wallet?: { table: string; account: string; heldMicroUsd?: number; feeMicroUsd: number; chargedMicroUsd: number; feeBps?: number };
 }
 
 /**
@@ -130,6 +130,20 @@ function walletItems(r: UsageRecord, month: string) {
   return charged ? [balance, spend] : [balance];
 }
 
+/**
+ * The PENDING row's condition: the hold as authorize wrote it. A settle or release whose hold was
+ * changed (its person, time, reservation, fee or account) is refused, so it moves no counter or wallet.
+ */
+function sameHold(r: UsageRecord) {
+  const w = r.wallet;
+  if (w && !Number.isInteger(w.feeBps)) throw new Error(`A hosted hold's record needs its feeBps: ${r.requestId}`);
+  return {
+    ConditionExpression: `${pkExists()} AND #person = :person AND #at = :at AND #reserved = :reserved AND ${w ? '#account = :account AND #feeBps = :feeBps' : 'attribute_not_exists(#account)'}`,
+    ExpressionAttributeNames: { '#person': 'person', '#at': 'at', '#reserved': 'reservedMicroUsd', '#account': 'account', ...(w ? { '#feeBps': 'feeBps' } : {}) },
+    ExpressionAttributeValues: { ':person': r.sub, ':at': r.requestTime, ':reserved': r.reservedMicroUsd, ...(w ? { ':account': w.account, ':feeBps': w.feeBps } : {}) },
+  };
+}
+
 /** DynamoDB idempotency token (max 36 chars) derived from app and request id. */
 export const clientRequestToken = (appId: string, requestId: string) =>
   createHash('sha256').update(`${appId}#${requestId}`).digest('hex').slice(0, 32);
@@ -170,7 +184,7 @@ export function usageTransaction(table: string, r: UsageRecord) {
   // Hosted, the daily cap counts charged amounts: the hold plus its fee, cost plus the fee charged.
   const fee = r.wallet?.feeMicroUsd ?? 0;
   const capHold = r.wallet?.heldMicroUsd ?? held;
-  const pending = held === undefined ? [] : [{ Delete: { TableName: table, Key: keys.pending(r.appId, r.requestId), ConditionExpression: pkExists() } }];
+  const pending = held === undefined ? [] : [{ Delete: { TableName: table, Key: keys.pending(r.appId, r.requestId), ...sameHold(r) } }];
   if (r.release) {
     if (held === undefined) throw new Error(`A release needs reservedMicroUsd: ${r.requestId}`);
     return new TransactWriteCommand({

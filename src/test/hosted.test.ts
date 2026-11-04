@@ -502,6 +502,23 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await spend(account)).toMatchObject({ stacksplit: held, 'stacksplit#costMicroUsd': held / 2, 'stacksplit#feeMicroUsd': held / 2 });
     });
 
+    test.each([
+      ['a bigger reservation', { reservedMicroUsd: 10 * RESERVED }],
+      ['a higher fee', { feeBps: 20_000 }],
+      ["another person's account", { account: sub('bystander') }],
+      ['no account (nothing charged)', { account: undefined }],
+      ['another person', { person: who('bystander') }],
+    ])('a release or settle of a hold changed by the caller (%s) is refused: no wallet moves, the hold stays for the sweeper', async (_, change) => {
+      const { m, person, account } = await linked(`forged-${Object.keys(change)[0]}`, 100_000);
+      await fund(sub('bystander'), 1_000);
+      const call = (await m.authorize(ask(person))) as Reservation;
+      const forged = { ...call, hold: { ...call.hold, ...change } };
+      for (const outcome of ['not_billed', usage] as const) expect(await m.record(forged, outcome)).not.toBe('recorded');
+      expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000 - HELD, heldMicroUsd: HELD, spentMicroUsd: 0 });
+      expect(await balance(sub('bystander'))).toMatchObject({ availableMicroUsd: 1_000, heldMicroUsd: 0, spentMicroUsd: 0 });
+      expect(await events(person)).toEqual([]);
+    });
+
     test("release ('not_billed'): the whole hold back to available, nothing spent, no SPEND", async () => {
       const { m, person, account } = await linked('release', 100_000);
       const call = (await m.authorize(ask(person))) as Reservation;

@@ -892,7 +892,7 @@ export function holdRecord(
     if (!facts.walletTable || !Number.isInteger(h.feeBps)) throw new Error(`A hosted hold needs the wallet table and its feeBps: ${facts.callId}`);
     const held = h.reservedMicroUsd + feeOf(h.reservedMicroUsd, h.feeBps!);
     // The person pays what served them, plus the fee on it, never more than the hold.
-    record.wallet = { table: facts.walletTable, account: h.account, heldMicroUsd: held, ...walletChargeOf(cost - absorbedOf(record), h.feeBps!, held) };
+    record.wallet = { table: facts.walletTable, account: h.account, heldMicroUsd: held, ...walletChargeOf(cost - absorbedOf(record), h.feeBps!, held), feeBps: h.feeBps };
   }
   record.usageHash = createHash('sha256')
     .update(JSON.stringify([record.kind, record.details, record.costMicroUsd, record.estimated ?? null, record.release ?? false]))
