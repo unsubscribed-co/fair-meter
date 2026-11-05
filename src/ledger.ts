@@ -56,8 +56,8 @@ export interface UsageRecord {
   reservedMicroUsd?: number;
   /** FairMeter: tells a repeat of this same record ('duplicate') from a different one ('conflict'). */
   usageHash?: string;
-  /** Not the provider's reported usage: the app aborted, no usage came back, or the sweeper settled it. */
-  estimated?: 'aborted' | 'no_usage' | 'swept';
+  /** Not the provider's reported usage: the app aborted (a hedge loser) or abandoned it after sending, no usage came back, or the sweeper settled it. */
+  estimated?: 'aborted' | 'abandoned' | 'no_usage' | 'swept';
   /** FairMeter 'not_billed': release the hold; no EVENT and no counters. */
   release?: boolean;
   /**
@@ -70,13 +70,14 @@ export interface UsageRecord {
 
 /**
  * What the operator absorbs of a settle, always a part of cost: the whole cost of an attempt that
- * didn't serve the person (swept, aborted) or whose usage the provider didn't report (no_usage). It still counts toward the cap; the person is charged
+ * didn't serve the person (swept, aborted) or whose usage the provider didn't report (no_usage). An
+ * abandoned attempt (sent, then the app gave up) is the person's: not absorbed. It still counts toward the cap; the person is charged
  * cost minus absorbed. Hosted, the cost the wallet wasn't charged (above the hold, or a rollup's
  * floor overrun): cost + fee - charged, where the fee is the part of the charge that is fee (walletChargeOf).
  */
 export const absorbedOf = (r: Pick<UsageRecord, 'estimated' | 'release' | 'costMicroUsd' | 'wallet'>) =>
   r.wallet ? (r.release ? 0 : r.costMicroUsd + r.wallet.feeMicroUsd - r.wallet.chargedMicroUsd)
-    : !r.release && r.estimated !== undefined ? r.costMicroUsd : 0;
+    : !r.release && r.estimated !== undefined && r.estimated !== 'abandoned' ? r.costMicroUsd : 0;
 
 /**
  * Hosted: what the wallet is charged for `paidMicroUsd` of cost plus its fee, at most `capMicroUsd`

@@ -427,7 +427,8 @@ export class FairMeter {
    *  - { estimate: <the same shape, or canonical meters { inputTokens, outputTokens, cacheReadTokens?,
    *    cacheWriteTokens?, reasoningTokens? }> }: the app's guess for an attempt it aborted (a hedge
    *    loser), settled at that cost, estimated 'aborted', no alarm;
-   *  - 'unknown': aborted or lost with no guess; settled at the reservation, estimated 'aborted';
+   *  - 'unknown': sent, then given up on or lost with no guess (a timeout, a network error); settled at
+   *    the reservation, estimated 'abandoned', and the person pays it (the provider usually billed it);
    *  - 'not_billed': the provider answered with an error status it doesn't bill; the hold is released;
    *  - 'not_sent': the app never called the provider; released exactly like 'not_billed' (the same record);
    *  - undefined or malformed: settled at the reservation, estimated 'no_usage', USAGE_MISSING (alarms).
@@ -788,7 +789,7 @@ export function settlementRecord(cfg: Pick<FairMeterConfig, 'appId' | 'env' | 'b
   if (!h.price || Number.isNaN(at.getTime()) || typeof h.reservedMicroUsd !== 'number') throw new Error('Unreadable hold');
   const facts = { appId: cfg.appId, env: cfg.env, callId: call.callId, hold: h, walletTable: hostedBilling(cfg.billing)?.walletTable };
   if (usage === 'not_billed' || usage === 'not_sent') return holdRecord(facts, 'release');
-  if (usage === 'unknown') return holdRecord(facts, 'aborted');
+  if (usage === 'unknown') return holdRecord(facts, 'abandoned');
   const estimate = typeof usage === 'object' && usage !== null && 'estimate' in usage;
   const given = estimate ? (usage as { estimate: unknown }).estimate : usage;
   const canonical = estimate && typeof given === 'object' && given !== null && 'inputTokens' in given;
@@ -858,7 +859,7 @@ function usageFacts(shape: PriceShape, usage: CallUsage) {
  */
 export function holdRecord(
   facts: { appId: string; env: string; callId: string; hold: HoldFacts; walletTable?: string },
-  outcome: 'release' | 'aborted' | 'no_usage' | 'swept' | ({ usage: CallUsage; baseCostMicroUsd: number; costMicroUsd: number; band?: string; tier?: string }),
+  outcome: 'release' | 'aborted' | 'abandoned' | 'no_usage' | 'swept' | ({ usage: CallUsage; baseCostMicroUsd: number; costMicroUsd: number; band?: string; tier?: string }),
   estimated?: 'aborted',
 ): UsageRecord {
   const h = facts.hold;
@@ -896,7 +897,7 @@ export function holdRecord(
     paidBy: h.paidBy,
     reservedMicroUsd: h.reservedMicroUsd,
     ...(release ? { release: true } : {}),
-    ...(atReservation && !release ? { estimated: outcome as 'aborted' | 'no_usage' | 'swept' } : estimated ? { estimated } : {}),
+    ...(atReservation && !release ? { estimated: outcome as 'aborted' | 'abandoned' | 'no_usage' | 'swept' } : estimated ? { estimated } : {}),
   };
   if (h.account !== undefined) {
     if (!facts.walletTable || !Number.isInteger(h.feeBps)) throw new Error(`A hosted hold needs the wallet table and its feeBps: ${facts.callId}`);

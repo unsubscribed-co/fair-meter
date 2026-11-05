@@ -529,12 +529,22 @@ suite('hosted billing against DynamoDB Local', () => {
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000, heldMicroUsd: 0 });
     });
 
-    test("an aborted attempt ('unknown'): absorbed, the person pays nothing, the hold comes back", async () => {
-      const { m, person, account } = await linked('aborted', 100_000);
+    test("an abandoned attempt ('unknown': sent, then the app gave up): the person pays the whole hold, estimated 'abandoned'", async () => {
+      const { m, person, account } = await linked('abandoned', 100_000);
       const call = (await m.authorize(ask(person))) as Reservation;
       expect(await m.record(call, 'unknown')).toBe('recorded');
+      expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000 - HELD, heldMicroUsd: 0, spentMicroUsd: HELD });
+      const [event] = await events(person);
+      expect(event).toMatchObject({ costMicroUsd: RESERVED, feeMicroUsd: HELD - RESERVED, estimated: 'abandoned', account });
+      expect(event).not.toHaveProperty('absorbedMicroUsd');
+    });
+
+    test("a hedge loser ({ estimate }): still absorbed, the person pays nothing, the hold comes back", async () => {
+      const { m, person, account } = await linked('hedge', 100_000);
+      const call = (await m.authorize(ask(person))) as Reservation;
+      expect(await m.record(call, { estimate: { inputTokens: 1000, outputTokens: 0 } })).toBe('recorded');
       expect(await balance(account)).toMatchObject({ availableMicroUsd: 100_000, heldMicroUsd: 0, spentMicroUsd: 0 });
-      expect(await events(person)).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, absorbedMicroUsd: RESERVED, feeMicroUsd: 0, account })]);
+      expect(await events(person)).toEqual([expect.objectContaining({ estimated: 'aborted', feeMicroUsd: 0, account })]);
     });
 
     test('no usage from the provider (a 200 without usage): absorbed, the whole hold back, nothing spent, USAGE_MISSING', async () => {

@@ -30,6 +30,10 @@ An ADJUST written when real usage arrives after a sweep.
 The part of an EVENT's cost the operator pays instead of the person (an attempt that didn't serve the person, or whose usage the provider didn't report). Recorded at list price and counted toward caps; the person's spend excludes it.
 _Avoid_: written off, free
 
+**Abandoned**:
+An attempt the app sent and then gave up on with no usage (its own timeout, a network error), recorded `'unknown'`. Settled at the hold (`estimated: 'abandoned'`) and paid by the person, never absorbed: the provider usually billed it.
+_Avoid_: aborted (a hedge loser, which is absorbed), timed out
+
 ## Actions
 
 **Action**:

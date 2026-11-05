@@ -56,7 +56,7 @@ export const EXPORT_COLUMNS: { name: string; type: 'string' | 'bigint' }[] = [
   // v0.2.0, events (the end of the list, so earlier columns keep their places)
   ['env', 'string'],
   ['paidBy', 'string'], // credit | paid
-  ['estimated', 'string'], // aborted | no_usage | swept; absent = the provider's own usage
+  ['estimated', 'string'], // aborted | abandoned | no_usage | swept; absent = the provider's own usage
   ['reservedMicroUsd', 'bigint'],
 ].map(([name, type]) => ({ name: name.toLowerCase(), type: type as 'string' | 'bigint' }));
 

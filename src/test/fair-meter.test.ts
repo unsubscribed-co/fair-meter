@@ -243,10 +243,10 @@ describe('record', () => {
     expect(console.error).not.toHaveBeenCalled();
   });
 
-  test("T7: 'unknown': settled at the hold, estimated 'aborted', no alarm", async () => {
+  test("T7: 'unknown': settled at the hold, estimated 'abandoned', no alarm", async () => {
     const call = await reserve();
     expect(await meter().record(call, 'unknown')).toBe('recorded');
-    expect(settled()).toMatchObject({ costMicroUsd: 5_798, estimated: 'aborted', inputTokens: 30_000, outputTokens: 4_096 });
+    expect(settled()).toMatchObject({ costMicroUsd: 5_798, estimated: 'abandoned', inputTokens: 30_000, outputTokens: 4_096 });
     expect(console.error).not.toHaveBeenCalled();
   });
 

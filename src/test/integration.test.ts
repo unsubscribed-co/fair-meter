@@ -192,15 +192,16 @@ suite('★ FairMeter against DynamoDB Local', () => {
     expect((await m.authorize(ask('cap6@x.co'))).ok).toBe(true);
   });
 
-  test("T7: 'unknown': aborted, at the hold, no error log", async () => {
+  test("T7: 'unknown': abandoned, at the hold, no error log", async () => {
     const call = (await meter().authorize(ask('t7@x.co'))) as Reservation;
     expect(await meter().record(call, 'unknown')).toBe('recorded');
-    expect(await events('t7@x.co')).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, estimated: 'aborted', absorbedMicroUsd: RESERVED })]);
+    expect(await events('t7@x.co')).toEqual([expect.objectContaining({ costMicroUsd: RESERVED, estimated: 'abandoned' })]);
+    expect(await events('t7@x.co')).toEqual([expect.not.objectContaining({ absorbedMicroUsd: expect.anything() })]);
     expect(console.error).not.toHaveBeenCalled();
-    // Counted toward the cap at the hold; the operator absorbs it.
+    // Counted toward the cap at the hold, and the person's: the provider usually billed it.
     expect(await day('t7@x.co')).toMatchObject({ committedMicroUsd: RESERVED, costMicroUsd: RESERVED });
-    expect(charged(await day('t7@x.co'))).toBe(0);
-    expect(charged(await month('t7@x.co'))).toBe(0);
+    expect(charged(await day('t7@x.co'))).toBe(RESERVED);
+    expect(charged(await month('t7@x.co'))).toBe(RESERVED);
   });
 
   test("{ estimate }: aborted at the app's estimate; committed released down to it", async () => {
@@ -397,9 +398,9 @@ suite('★ FairMeter against DynamoDB Local', () => {
       const served = (await meter().authorize(ask('u-abs@x.co'))) as Reservation;
       await meter().record(served, usage);
       const aborted = (await meter().authorize(ask('u-abs@x.co'))) as Reservation;
-      await meter().record(aborted, 'unknown');
+      await meter().record(aborted, { estimate: { inputTokens: 10_000, outputTokens: 0 } });
       expect(await meter().usage('u-abs@x.co')).toMatchObject({
-        day: { spentMicroUsd: 440, heldMicroUsd: 0, roomMicroUsd: CAP - 440 - RESERVED },
+        day: { spentMicroUsd: 440, heldMicroUsd: 0, roomMicroUsd: CAP - 440 - 1_000 },
         month: { spentMicroUsd: 440 },
       });
     });

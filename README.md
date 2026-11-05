@@ -2,6 +2,8 @@
 
 Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): every paid thing a person does, an AI call or an action like a new expense, is priced at the published list price and written to an append-only ledger in a DynamoDB table that metering owns, with caps that stop spend before it happens. Self-hosted copies run it with `billing: 'none'`: the ledger and caps stay on, nobody is charged, no fee.
 
+**v0.4.4** charges abandoned attempts. An attempt recorded `'unknown'` (sent, then the app gave up: its own timeout, a network error) is settled at the hold as before but now marked `estimated: 'abandoned'` and paid by the person, hosted at the hold plus its fee: the provider usually billed it, and absorbing it let a person push the cost of slow answers onto the operator. Hedge losers (`{ estimate }`), sweeps and `no_usage` stay absorbed; the `no_usage` alarm and cap are unchanged. Under `billing: 'none'` it moves from absorbed into what `usage` reports the person spent. Apps need no change: keep recording `'unknown'`.
+
 **v0.4.3** lowers StackSplit's usage profiles to a believable day: regular is 10 new expenses, 4 changes and 5 assistant questions a day (was 35, 15 and 5), light 2, 1 and 1, heavy 40, 16 and 20. Its published list (`prices/apps/stacksplit.list.json`, valid from 2026-11-05) is regenerated with `list --write`; action and AI prices are unchanged, so only the profile estimates move (regular $0.1868 a month, was $0.2055). No code change.
 
 **v0.4.2** hardens the money path before real money. A provider answer without usable usage (`no_usage`) is absorbed: the person pays nothing, `USAGE_MISSING` still alarms, and past `noUsageCapUsd` (default USD 1 per app, in total across days) of that cost the app's AI calls pause until an operator resets it (see "When the provider reports no usage"). A settle or release moves money only for the hold `authorize` wrote (its person, time, reservation, fee rate and account). Hosted: a late usage after a sweep stays absorbed; an app's role reaches only its own `LINK#<app>#*` rows; synth and startup check the action floor with its fee against the daily cap, and `CALL_EXCEEDS_CAP` logs that floor; a cached link no longer relabels a moved wallet. ADJUST rows carry `env`. Each `authorize` makes one more consistent read (`APP#<app>` `NO_USAGE`). Upgrading: a hosted settle queued by v0.4.1 (no `feeBps` on its record) is parked in the retry DLQ (`USAGE_RECORD_PARKED`), and the sweeper settles its hold, absorbed.
@@ -17,7 +19,7 @@ Metering for apps hosted at cost ([Unsubscribed!](https://unsubscribed.dev)): ev
 TypeScript source, no build step: your bundler (esbuild via CDK's `NodejsFunction`) compiles it with your code.
 
 ```
-npm install github:unsubscribed-co/fair-meter#v0.4.3
+npm install github:unsubscribed-co/fair-meter#v0.4.4
 ```
 
 - `fair-meter` exports everything; `fair-meter/cdk` has the constructs (`Metering`, `MeteringRetry`, `DeepSeekReconciliation`, `MeteringExport`, `FreeTierWatch`); `fair-meter/testing` has the test double (`FakeFairMeter`, see "Testing your metering code"); `fair-meter/<file>` reaches one file.
@@ -68,7 +70,7 @@ Each `FairMeter` caches a SKU's price versions for 5 minutes and picks the one v
 |---|---|---|---|
 | the provider's usage block | it answered | the actual cost (the price's provider picks the adapter) | the person |
 | `{ estimate: <usage block or meters> }` | the app aborted it but can guess (a hedge loser's input tokens); meters are `{ inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens?, reasoningTokens? }`, the same for every provider | that estimate, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
-| `'unknown'` | aborted or lost with no guess (timeout, network error after sending) | the hold, `estimated: 'aborted'`, no alarm | the operator (absorbed) |
+| `'unknown'` | sent, then given up on or lost with no guess (the app's own timeout, a network error after sending) | the hold, `estimated: 'abandoned'`, no alarm | the person (since v0.4.4: the provider usually billed it; hosted, the hold plus its fee) |
 | `'not_billed'` | an error status the provider doesn't bill (4xx, 5xx, 429) | nothing: the hold is released, no EVENT | nobody |
 | `'not_sent'` | the app reserved but never called the provider | the same release as `'not_billed'` (the same record: one after the other is a `duplicate`) | nobody |
 | `undefined` or malformed | a 200 without usable usage | the hold, `estimated: 'no_usage'`, USAGE_MISSING alarms | the operator (absorbed, since v0.4.2: the provider's fault, not the person's) |

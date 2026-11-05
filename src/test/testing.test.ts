@@ -138,11 +138,18 @@ describe.each([
     expect((await m.usage(p)).day).toEqual({ spentMicroUsd: 0, heldMicroUsd: 0, capMicroUsd: CAP, roomMicroUsd: CAP, resetsAt: RESETS.day });
   });
 
-  it("usage after an absorbed settle ('unknown'): counted toward the cap, $0 to the person", async () => {
+  it("usage after an absorbed settle (a hedge loser): counted toward the cap, $0 to the person", async () => {
     const m = subject.meter({ dailyCapMicroUsd: CAP });
     const p = who('absorbed');
+    expect(await m.record((await m.authorize(ask(p))) as Reservation, { estimate: { inputTokens: 10_000, outputTokens: 0 } })).toBe('recorded');
+    expect(await m.usage(p)).toMatchObject({ day: { spentMicroUsd: 0, heldMicroUsd: 0, roomMicroUsd: CAP - 1_000 }, month: { spentMicroUsd: 0 } });
+  });
+
+  it("usage after an abandoned settle ('unknown'): the person pays the hold", async () => {
+    const m = subject.meter({ dailyCapMicroUsd: CAP });
+    const p = who('abandoned');
     expect(await m.record((await m.authorize(ask(p))) as Reservation, 'unknown')).toBe('recorded');
-    expect(await m.usage(p)).toMatchObject({ day: { spentMicroUsd: 0, heldMicroUsd: 0, roomMicroUsd: CAP - RESERVED }, month: { spentMicroUsd: 0 } });
+    expect(await m.usage(p)).toMatchObject({ day: { spentMicroUsd: RESERVED, heldMicroUsd: 0, roomMicroUsd: CAP - RESERVED }, month: { spentMicroUsd: RESERVED } });
   });
 
   it('a SKU without a price: 503 pricing_not_configured', async () => {
@@ -221,7 +228,7 @@ describe.each([
   it("usage shows what the person was charged as cost and fee apart (providers 440 + project 440 = 880); an absorbed attempt adds neither", async () => {
     const m = await linked('apart', 100_000);
     expect(await m.record((await m.authorize(ask(who('apart')))) as Reservation, usage)).toBe('recorded');
-    expect(await m.record((await m.authorize(ask(who('apart')))) as Reservation, 'unknown')).toBe('recorded');
+    expect(await m.record((await m.authorize(ask(who('apart')))) as Reservation, { estimate: { inputTokens: 10_000, outputTokens: 0 } })).toBe('recorded');
     const { day, month } = await m.usage(who('apart'));
     expect(day).toMatchObject({ spentMicroUsd: 880, costMicroUsd: 440, feeMicroUsd: 440 });
     expect(month).toMatchObject({ spentMicroUsd: 880, costMicroUsd: 440, feeMicroUsd: 440 });
