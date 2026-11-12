@@ -26,10 +26,7 @@
   },
   "profiles": {
     "light": {
-      "actions": {
-        "stacksplit-new-expense": 2,
-        "stacksplit-change-expense": 1
-      },
+      "actions": {},
       "ai": {
         "claude-haiku-5-5": {
           "callsPerDay": 1,
@@ -42,10 +39,7 @@
       }
     },
     "regular": {
-      "actions": {
-        "stacksplit-new-expense": 10,
-        "stacksplit-change-expense": 4
-      },
+      "actions": {},
       "ai": {
         "claude-haiku-5-5": {
           "callsPerDay": 5,
@@ -58,10 +52,7 @@
       }
     },
     "heavy": {
-      "actions": {
-        "stacksplit-new-expense": 40,
-        "stacksplit-change-expense": 16
-      },
+      "actions": {},
       "ai": {
         "claude-haiku-5-5": {
           "callsPerDay": 20,

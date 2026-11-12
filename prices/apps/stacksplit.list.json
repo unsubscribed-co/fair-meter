@@ -1,8 +1,8 @@
 {
-  "validFrom": "2026-11-05T00:00:00Z",
+  "validFrom": "2026-11-13T00:00:00Z",
   "app": "stacksplit",
   "region": "us-east-2",
-  "at": "2026-11-04T20:10:15Z",
+  "at": "2026-11-12T22:36:58Z",
   "feeBps": 10000,
   "rates": {
     "readRequestUnit": "0.0000001250",
@@ -50,10 +50,10 @@
           "costMicroUsdPerCall": 598
         }
       ],
-      "dailyCostMicroUsd": 625,
-      "monthlyCostMicroUsd": 18750,
-      "monthlyPriceMicroUsd": 37500,
-      "daysFor2Usd": 1600
+      "dailyCostMicroUsd": 598,
+      "monthlyCostMicroUsd": 17940,
+      "monthlyPriceMicroUsd": 35880,
+      "daysFor2Usd": 1672
     },
     "regular": {
       "ai": [
@@ -63,10 +63,10 @@
           "costMicroUsdPerCall": 598
         }
       ],
-      "dailyCostMicroUsd": 3113,
-      "monthlyCostMicroUsd": 93390,
-      "monthlyPriceMicroUsd": 186780,
-      "daysFor2Usd": 321
+      "dailyCostMicroUsd": 2990,
+      "monthlyCostMicroUsd": 89700,
+      "monthlyPriceMicroUsd": 179400,
+      "daysFor2Usd": 334
     },
     "heavy": {
       "ai": [
@@ -76,10 +76,10 @@
           "costMicroUsdPerCall": 598
         }
       ],
-      "dailyCostMicroUsd": 12448,
-      "monthlyCostMicroUsd": 373440,
-      "monthlyPriceMicroUsd": 746880,
-      "daysFor2Usd": 80
+      "dailyCostMicroUsd": 11960,
+      "monthlyCostMicroUsd": 358800,
+      "monthlyPriceMicroUsd": 717600,
+      "daysFor2Usd": 83
     }
   }
 }
